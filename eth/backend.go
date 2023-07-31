@@ -275,6 +275,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		return nil, err
 	}
 
+	// 🚀 实例化Miner, 只需等待命令开启挖矿
 	eth.miner = miner.New(eth, &config.Miner, chainConfig, eth.EventMux(), eth.engine, eth.isLocalBlock)
 	eth.miner.SetExtra(makeExtraData(config.Miner.ExtraData))
 
@@ -517,8 +518,10 @@ func (s *Ethereum) SetEtherbase(etherbase common.Address) {
 // StartMining starts the miner with the given number of CPU threads. If mining
 // is already running, this method adjust the number of threads allowed to use
 // and updates the minimum price required by the transaction pool.
+// 启动挖矿
 func (s *Ethereum) StartMining(threads int) error {
 	// Update the thread count within the consensus engine
+	// 首先看挖矿的共识引擎是否支持设置线程数，如果支持，将更新此共识引擎参数
 	type threaded interface {
 		SetThreads(threads int)
 	}
@@ -531,6 +534,7 @@ func (s *Ethereum) StartMining(threads int) error {
 	}
 	// If the miner was not running, initialize it
 	if !s.IsMining() {
+		// 在启动前，需要确定两项配置：交易GasPrice下限，和挖矿奖励接收账户（矿工账户地址）。
 		// Propagate the initial price point to the transaction pool
 		s.lock.RLock()
 		price := s.gasPrice
@@ -552,13 +556,16 @@ func (s *Ethereum) StartMining(threads int) error {
 			}
 		}
 		if cli != nil {
+			// 对于 clique.Clique 共识引擎（PoA 权限共识），进行了特殊处理，需要从钱包中查找挖矿账户
 			wallet, err := s.accountManager.Find(accounts.Account{Address: eb})
 			if wallet == nil || err != nil {
 				log.Error("Etherbase account unavailable locally", "err", err)
 				return fmt.Errorf("signer missing: %v", err)
 			}
+			// 在进行挖矿时不再是进行PoW计算，而是使用认可的账户进行区块签名
 			cli.Authorize(eb, wallet.SignData)
 		}
+		// 对于Parlia 共识引擎，授权 Etherbase 帐户
 		if parlia, ok := s.engine.(*parlia.Parlia); ok {
 			wallet, err := s.accountManager.Find(accounts.Account{Address: eb})
 			if wallet == nil || err != nil {
@@ -570,8 +577,9 @@ func (s *Ethereum) StartMining(threads int) error {
 		}
 		// If mining is started, we can disable the transaction rejection mechanism
 		// introduced to speed sync times.
+		// 在挖矿前将允许接收网络交易
 		atomic.StoreUint32(&s.handler.acceptTxs, 1)
-
+		// 开始在挖矿账户下开启挖矿
 		go s.miner.Start(eb)
 	}
 	return nil

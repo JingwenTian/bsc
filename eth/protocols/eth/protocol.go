@@ -29,6 +29,10 @@ import (
 )
 
 // Constants to match up protocol versions and messages
+// 当以太坊网络进行协议升级时, 会引入新的协议版本号来区分不同的协议规范.这些协议版本号用于标识节点所使用的协议版本, 并确保节点能够正确解析和处理收到的消息.
+// ETH/66: 以太坊协议的较早版本, 引入了一些重要的消息类型, 如UpgradeStatusMsg, 用于在协议升级时进行握手和确认.ETH/66版本的协议规范定义了节点之间的通信协议和消息格式.
+// ETH/67: 以太坊协议的更新版本, 引入了一些新的消息类型, 如 NewPooledTransactionHashesMsg, GetPooledTransactionsMsg 和 PooledTransactionsMsg.
+// ........这些新的消息类型用于传输和处理未确认交易的信息.ETH/67版本的协议规范扩展了以太坊网络的功能和性能.
 const (
 	ETH66 = 66
 	ETH67 = 67
@@ -49,25 +53,27 @@ var protocolLengths = map[uint]uint64{ETH67: 18, ETH66: 17}
 // maxMessageSize is the maximum cap on the size of a protocol message.
 const maxMessageSize = 10 * 1024 * 1024
 
+// 👇 以太坊协议中定义的消息类型常量.这些常量用于区分不同类型的消息, 并在以太坊网络中进行通信
+// 这些消息类型用于以太坊节点之间的通信, 以实现区块链同步、交易传输和其他协议功能.
 const (
-	StatusMsg                     = 0x00
-	NewBlockHashesMsg             = 0x01
-	TransactionsMsg               = 0x02
-	GetBlockHeadersMsg            = 0x03
-	BlockHeadersMsg               = 0x04
-	GetBlockBodiesMsg             = 0x05
-	BlockBodiesMsg                = 0x06
-	NewBlockMsg                   = 0x07
-	GetNodeDataMsg                = 0x0d
-	NodeDataMsg                   = 0x0e
-	GetReceiptsMsg                = 0x0f
-	ReceiptsMsg                   = 0x10
-	NewPooledTransactionHashesMsg = 0x08
-	GetPooledTransactionsMsg      = 0x09
-	PooledTransactionsMsg         = 0x0a
+	StatusMsg                     = 0x00 // 握手消息, 用于建立网络连接和交换信息的初始阶段.
+	NewBlockHashesMsg             = 0x01 // 用于传递新块的哈希列表以供同步其他节点的链.
+	TransactionsMsg               = 0x02 // 用于传递未打包的交易, 以便其他节点可以执行和验证这些交易.
+	GetBlockHeadersMsg            = 0x03 // 请求某个区块范围内的区块头列表.
+	BlockHeadersMsg               = 0x04 // 响应请求, 包含某个区块范围内的区块头列表.
+	GetBlockBodiesMsg             = 0x05 // 请求某个区块范围内的区块体列表.
+	BlockBodiesMsg                = 0x06 // 响应请求, 包含某个区块范围内的区块体列表.
+	NewBlockMsg                   = 0x07 // 用于广播新生成的块.
+	GetNodeDataMsg                = 0x0d // 请求特定节点数据的消息.
+	NodeDataMsg                   = 0x0e // 包含特定节点数据的响应消息.
+	GetReceiptsMsg                = 0x0f // 请求交易收据的消息.
+	ReceiptsMsg                   = 0x10 // 包含交易收据的响应消息.
+	NewPooledTransactionHashesMsg = 0x08 // 用于传输一批新的未确认交易的哈希列表.
+	GetPooledTransactionsMsg      = 0x09 // 请求未确认交易的完整信息.
+	PooledTransactionsMsg         = 0x0a // 包含未确认交易的完整信息的响应消息.
 
 	// Protocol messages overloaded in eth/66
-	UpgradeStatusMsg = 0x0b
+	UpgradeStatusMsg = 0x0b // 这是以太坊协议的一部分, 用于协议升级时的握手消息.
 )
 
 var (
@@ -88,13 +94,16 @@ type Packet interface {
 }
 
 // StatusPacket is the network packet for the status message for eth/64 and later.
+// 网络数据包结构
+// 通过传输这些状态信息，节点可以告知其他节点有关其协议版本、网络标识符、链的工作量证明难度、当前链头的哈希值、创世块的哈希值以及支持的分叉情况.
+// 这些信息对于节点之间的连接和区块链同步非常重要，并有助于确保节点之间的一致性和正确性.
 type StatusPacket struct {
-	ProtocolVersion uint32
-	NetworkID       uint64
-	TD              *big.Int
-	Head            common.Hash
-	Genesis         common.Hash
-	ForkID          forkid.ID
+	ProtocolVersion uint32      // 以太坊协议的版本号.它指示节点所使用的协议版本.
+	NetworkID       uint64      // 以太坊网络的唯一标识符.不同的以太坊网络可以具有不同的网络标识符.
+	TD              *big.Int    // 链的总难度（Total Difficulty）.它是一个大整数，表示当前链的工作量证明难度.
+	Head            common.Hash // 链的头部块的哈希值.它指示当前链上的最新区块.
+	Genesis         common.Hash // 以太坊区块链的创世块（Genesis Block）的哈希值.它标识了区块链的起始点.
+	ForkID          forkid.ID   // 分叉标识符.它描述了节点支持的以太坊协议的分叉情况.
 }
 
 type UpgradeStatusExtension struct {
@@ -114,6 +123,8 @@ type UpgradeStatusPacket struct {
 	Extension *rlp.RawValue `rlp:"nil"`
 }
 
+// 获取升级状态扩展的信息
+// UpgradeStatusPacket 是以太坊协议中用于握手和确认升级的消息类型之一
 func (p *UpgradeStatusPacket) GetExtension() (*UpgradeStatusExtension, error) {
 	extension := &UpgradeStatusExtension{}
 	if p.Extension == nil {

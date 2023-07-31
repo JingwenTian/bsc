@@ -188,9 +188,9 @@ type worker struct {
 
 	// Subscriptions
 	mux          *event.TypeMux
-	chainHeadCh  chan core.ChainHeadEvent
+	chainHeadCh  chan core.ChainHeadEvent // 监听新区块事件
 	chainHeadSub event.Subscription
-	chainSideCh  chan core.ChainSideEvent
+	chainSideCh  chan core.ChainSideEvent // 监听新分叉链事件
 	chainSideSub event.Subscription
 
 	// Channels
@@ -272,11 +272,13 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 		recommit = minRecommitInterval
 	}
 
+	// ---------------------------
+	// 在创建worker 时，将在 worker 内开启四个 goroutine 来分别监听不同信号。
 	worker.wg.Add(4)
-	go worker.mainLoop()
-	go worker.newWorkLoop(recommit)
-	go worker.resultLoop()
-	go worker.taskLoop()
+	go worker.mainLoop()            // mainLoop 将监听 newWork 、tx、chainSide 信号。newWork 表示将开始挖采下一个新区块
+	go worker.newWorkLoop(recommit) // newWorkLoop 负责根据不同情况来抉择是否需要终止当前工作，或者开始新一个区块挖掘
+	go worker.resultLoop()          // resultLoop 完成区块的最后工作，即将计算结构和区块基本数据组合成一个符合共识算法的区块。完成区块最后的数据存储和网络广播。
+	go worker.taskLoop()            // taskLoop 是在监听任务。任务是指包含了新区块内容的任务，表示可以将此新区块进行PoW计算
 
 	// Submit first work to initialize pending state.
 	if init {
@@ -386,7 +388,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 		}
 		interruptCh = make(chan int32, 1)
 		select {
-		case w.newWorkCh <- &newWorkReq{interruptCh: interruptCh, timestamp: timestamp}:
+		case w.newWorkCh <- &newWorkReq{interruptCh: interruptCh, timestamp: timestamp}: // 发送newWork信号
 		case <-w.exitCh:
 			return
 		}
@@ -405,12 +407,13 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 
 	for {
 		select {
-		case <-w.startCh:
+		case <-w.startCh: // Start信号: 开启挖矿的信号
+			// 对 worker 发送 start 信号后，该信号将进入 startCh chain中。一旦获得信号，则立即重新开始commit新区块，重新开始干活。
 			clearPending(w.chain.CurrentBlock().NumberU64())
 			timestamp = time.Now().Unix()
 			commit(commitInterruptNewHead)
 
-		case head := <-w.chainHeadCh:
+		case head := <-w.chainHeadCh: // chainHead信号: 接收新区块的信号
 			if !w.isRunning() {
 				continue
 			}
@@ -429,7 +432,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			}
 			commit(commitInterruptNewHead)
 
-		case <-timer.C:
+		case <-timer.C: // Timer信号: 定时检查任务
 			// If sealing is running resubmit a new work cycle periodically to pull in
 			// higher priced transactions. Disable this overhead for pending blocks.
 			if w.isRunning() && ((w.chainConfig.Ethash != nil) || (w.chainConfig.Clique != nil &&
@@ -475,10 +478,11 @@ func (w *worker) mainLoop() {
 
 	for {
 		select {
-		case req := <-w.newWorkCh:
+		case req := <-w.newWorkCh: // 新工作启动信号
 			w.commitWork(req.interruptCh, req.timestamp)
 
 		case req := <-w.getWorkCh:
+			// ⭐⭐⭐ 执行铸块任务
 			block, err := w.generateWork(req.params)
 			if err != nil {
 				req.err = err
@@ -746,6 +750,8 @@ func (w *worker) commitUncle(env *environment, uncle *types.Header) error {
 }
 
 // updateSnapshot updates pending snapshot block, receipts and state.
+// 更新 environment 快照。快照中记录了区块内容和区块StateDB信息。
+// 相对于把当前 environment 备份到内存中。这个备份对挖矿没什么用途，只是方便外部查看 PendingBlock。
 func (w *worker) updateSnapshot(env *environment) {
 	w.snapshotMu.Lock()
 	defer w.snapshotMu.Unlock()
@@ -762,22 +768,29 @@ func (w *worker) updateSnapshot(env *environment) {
 }
 
 func (w *worker) commitTransaction(env *environment, tx *types.Transaction, receiptProcessors ...core.ReceiptProcessor) ([]*types.Log, error) {
+	// 获取当前状态的快照，用于在执行交易出现错误时进行回滚
 	snap := env.state.Snapshot()
-
+	// 执行指定的交易。该方法会根据传入的参数执行交易，包括验证交易、执行合约调用以及生成交易收据。
 	receipt, err := core.ApplyTransaction(w.chainConfig, w.chain, &env.coinbase, env.gasPool, env.state, env.header, tx, &env.header.GasUsed, *w.chain.GetVMConfig(), receiptProcessors...)
-	if err != nil {
+	if err != nil { // 如果执行交易出现错误，将状态回滚到之前获取的快照，并返回错误。
 		env.state.RevertToSnapshot(snap)
 		return nil, err
 	}
+	// 将执行成功的交易添加到环境变量中的交易列表中。
 	env.txs = append(env.txs, tx)
+	// 将生成的交易收据添加到环境变量中的收据列表中。
 	env.receipts = append(env.receipts, receipt)
 
 	return receipt.Logs, nil
 }
 
+// 处理待处理交易并创建新的区块
 func (w *worker) commitTransactions(env *environment, txs *types.TransactionsByPriceAndNonce,
 	interruptCh chan int32, stopTimer *time.Timer) error {
+
+	// 获取当前区块的Gas限制
 	gasLimit := env.header.GasLimit
+	// 如果Gas池不存在，则创建一个新的Gas池
 	if env.gasPool == nil {
 		env.gasPool = new(core.GasPool).AddGas(gasLimit)
 		if w.chain.Config().IsEuler(env.header.Number) {
@@ -787,23 +800,34 @@ func (w *worker) commitTransactions(env *environment, txs *types.TransactionsByP
 		}
 	}
 
+	// 创建一个空数组来存储合并后的日志
 	var coalescedLogs []*types.Log
 	// initialize bloom processors
+	// 根据交易池中的交易数量确定处理器的初始容量
 	processorCapacity := 100
 	if txs.CurrentSize() < processorCapacity {
 		processorCapacity = txs.CurrentSize()
 	}
+	// 创建一个异步收据布隆过滤器生成器
 	bloomProcessors := core.NewAsyncReceiptBloomGenerator(processorCapacity)
 
+	// 创建一个停止预取的通道，并在返回前关闭它
 	stopPrefetchCh := make(chan struct{})
 	defer close(stopPrefetchCh)
+
 	//prefetch txs from all pending txs
+	// 复制待处理交易以进行预取
 	txsPrefetch := txs.Copy()
+
+	// 获取复制的交易池中的第一笔交易
 	tx := txsPrefetch.Peek()
-	txCurr := &tx
+	txCurr := &tx // 创建一个指向当前交易的指针
+	// 预取用于挖矿的交易
 	w.prefetcher.PrefetchMining(txsPrefetch, env.header, env.gasPool.Gas(), env.state.CopyDoPrefetch(), *w.chain.GetVMConfig(), stopPrefetchCh, txCurr)
 
+	// 将中断信号初始设置为false
 	signal := commitInterruptNone
+	// 进入一个无限循环，用于处理待处理的交易
 LOOP:
 	for {
 		// In the following three cases, we will interrupt the execution of the transaction.
@@ -812,6 +836,8 @@ LOOP:
 		// (3) worker recreate the sealing block with any newly arrived transactions, the reason is 2.
 		// For the first two cases, the semi-finished work will be discarded.
 		// For the third case, the semi-finished work will be submitted to the consensus engine.
+
+		// 如果中断通道不为空，则检查是否有中断信号，根据信号决定是否中断执行
 		if interruptCh != nil {
 			select {
 			case signal, ok := <-interruptCh:
@@ -824,11 +850,13 @@ LOOP:
 			}
 		}
 		// If we don't have enough gas for any further transactions then we're done
+		// 如果 gas 池中的 gas 不足以继续处理交易，则中断执行并标记为 commitInterruptOutOfGas
 		if env.gasPool.Gas() < params.TxGas {
 			log.Trace("Not enough gas for further transactions", "have", env.gasPool, "want", params.TxGas)
 			signal = commitInterruptOutOfGas
 			break
 		}
+		// 如果计时器不为空，则检查是否超时，超时则中断执行并标记为 commitInterruptTimeout。
 		if stopTimer != nil {
 			select {
 			case <-stopTimer.C:
@@ -840,8 +868,9 @@ LOOP:
 			}
 		}
 		// Retrieve the next transaction and abort if all done
+		// 获取待处理交易中的下一个交易
 		tx = txs.Peek()
-		if tx == nil {
+		if tx == nil { // 如果没有待处理的交易，表示所有交易已经处理完毕，退出循环。
 			break
 		}
 		// Error may be ignored here. The error has already been checked
@@ -851,15 +880,20 @@ LOOP:
 		//from, _ := types.Sender(env.signer, tx)
 		// Check whether the tx is replay protected. If we're not in the EIP155 hf
 		// phase, start ignoring the sender until we do.
+		// 检查交易是否受到回放保护，并且当前区块不处于 EIP-155 阶段，如果满足条件，则忽略该交易。
 		if tx.Protected() && !w.chainConfig.IsEIP155(env.header.Number) {
 			//log.Trace("Ignoring reply protected transaction", "hash", tx.Hash(), "eip155", w.chainConfig.EIP155Block)
 			txs.Pop()
 			continue
 		}
 		// Start executing the transaction
+		// 准备处理指定的交易
 		env.state.Prepare(tx.Hash(), env.tcount)
 
+		// 执行并提交指定的交易
 		logs, err := w.commitTransaction(env, tx, bloomProcessors)
+
+		// 根据返回的错误类型进行不同的处理逻辑
 		switch {
 		case errors.Is(err, core.ErrGasLimitReached):
 			// Pop the current out-of-gas transaction without shifting in the next from the account
@@ -894,7 +928,9 @@ LOOP:
 			txs.Shift()
 		}
 	}
+	// 关闭 Bloom 过滤器处理器
 	bloomProcessors.Close()
+	// 如果矿工没有在运行状态，并且存在合并的日志，则发送这些日志给订阅器 pendingLogsFeed
 	if !w.isRunning() && len(coalescedLogs) > 0 {
 		// We don't push the pendingLogsEvent while we are sealing. The reason is that
 		// when we are sealing, the worker will regenerate a sealing block every 3 seconds.
@@ -910,6 +946,7 @@ LOOP:
 		}
 		w.pendingLogsFeed.Send(cpy)
 	}
+	// 根据中断信号返回相应的错误
 	return signalToErr(signal)
 }
 
@@ -1010,10 +1047,15 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 // fillTransactions retrieves the pending transactions from the txpool and fills them
 // into the given sealing block. The transaction selection and ordering strategy can
 // be customized with the plugin in the future.
+// 用于将待处理的本地交易和远程交易填充进区块
 func (w *worker) fillTransactions(interruptCh chan int32, env *environment, stopTimer *time.Timer) (err error) {
 	// Split the pending transactions into locals and remotes
 	// Fill the block with all available pending transactions.
+	// 从TxPool中获取当前所有未确认的待处理交易。
 	pending := w.eth.TxPool().Pending(false)
+	// 将待处理交易分为本地交易（localTxs）和远程交易（remoteTxs）。
+	// 本地交易指的是来自本地节点的交易，远程交易指的是来自其他节点的交易。
+	// 遍历本地交易的账户地址，并将其从远程交易中移除，放入本地交易列表。
 	localTxs, remoteTxs := make(map[common.Address]types.Transactions), pending
 	for _, account := range w.eth.TxPool().Locals() {
 		if txs := remoteTxs[account]; len(txs) > 0 {
@@ -1023,9 +1065,11 @@ func (w *worker) fillTransactions(interruptCh chan int32, env *environment, stop
 	}
 
 	err = nil
+	// 如果本地交易列表不为空，将其中的交易填充进区块。
 	if len(localTxs) > 0 {
+		// ⭐⭐ 创建新的交易列表 (堆中可以按照Gas价格和时间进行排序)
 		txs := types.NewTransactionsByPriceAndNonce(env.signer, localTxs, env.header.BaseFee)
-		err = w.commitTransactions(env, txs, interruptCh, stopTimer)
+		err = w.commitTransactions(env, txs, interruptCh, stopTimer) // 处理并提交本地交易。
 		// we will abort here when:
 		//   1.new block was imported
 		//   2.out of Gas, no more transaction can be added.
@@ -1036,6 +1080,7 @@ func (w *worker) fillTransactions(interruptCh chan int32, env *environment, stop
 			return
 		}
 	}
+	// 如果远程交易列表不为空，将其中的交易填充进区块。
 	if len(remoteTxs) > 0 {
 		txs := types.NewTransactionsByPriceAndNonce(env.signer, remoteTxs, env.header.BaseFee)
 		err = w.commitTransactions(env, txs, interruptCh, stopTimer)
@@ -1052,13 +1097,16 @@ func (w *worker) generateWork(params *generateParams) (*types.Block, error) {
 	}
 	defer work.discard()
 
+	// ⭐ 将待处理的本地交易和远程交易填充进区块
 	w.fillTransactions(nil, work, nil)
+	// ⭐ 组装成最终的区块
 	block, _, err := w.engine.FinalizeAndAssemble(w.chain, work.header, work.state, work.txs, work.unclelist(), work.receipts)
 	return block, err
 }
 
 // commitWork generates several new sealing tasks based on the parent block
 // and submit them to the sealer.
+// ⭐ 重新开始下一个区块的挖矿的第一个环节“构建新区块”。这个是整个挖矿业务处理的一个核心，值得关注。
 func (w *worker) commitWork(interruptCh chan int32, timestamp int64) {
 	start := time.Now()
 

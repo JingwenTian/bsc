@@ -329,7 +329,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		if p == nil {
 			return errors.New("unknown peer")
 		}
-		return p.RequestTxs(hashes)
+		return p.RequestTxs(hashes) // 生成按收到的tx hash向远程节点发送请求tx的请求
 	}
 	h.txFetcher = fetcher.NewTxFetcher(h.txpool.Has, h.txpool.AddRemotes, fetchTx)
 	h.chainSync = newChainSyncer(h)
@@ -679,6 +679,8 @@ func (h *handler) Start(maxPeers int, maxPeersPerIP int) {
 	h.maxPeersPerIP = maxPeersPerIP
 	// broadcast transactions
 	h.wg.Add(1)
+
+	// 外部只需要订阅 SubscribeNewTxsEvent 新可执行交易事件，则可实时接受交易。在 geth 中网络层将订阅交易事件，以便实时广播。
 	h.txsCh = make(chan core.NewTxsEvent, txChanSize)
 	h.txsSub = h.txpool.SubscribeNewTxsEvent(h.txsCh)
 	go h.txBroadcastLoop()
@@ -918,7 +920,7 @@ func (h *handler) txBroadcastLoop() {
 	for {
 		select {
 		case event := <-h.txsCh:
-			h.BroadcastTransactions(event.Txs)
+			h.BroadcastTransactions(event.Txs) // 广播交易
 		case <-h.txsSub.Err():
 			return
 		}

@@ -164,23 +164,25 @@ type Decoder interface {
 	Time() time.Time
 }
 
+// 消息类型对应的处理器
 var eth66 = map[uint64]msgHandler{
-	NewBlockHashesMsg:             handleNewBlockhashes,
-	NewBlockMsg:                   handleNewBlock,
-	TransactionsMsg:               handleTransactions,
-	NewPooledTransactionHashesMsg: handleNewPooledTransactionHashes,
-	GetBlockHeadersMsg:            handleGetBlockHeaders66,
-	BlockHeadersMsg:               handleBlockHeaders66,
-	GetBlockBodiesMsg:             handleGetBlockBodies66,
-	BlockBodiesMsg:                handleBlockBodies66,
-	GetNodeDataMsg:                handleGetNodeData66,
-	NodeDataMsg:                   handleNodeData66,
-	GetReceiptsMsg:                handleGetReceipts66,
-	ReceiptsMsg:                   handleReceipts66,
-	GetPooledTransactionsMsg:      handleGetPooledTransactions66,
-	PooledTransactionsMsg:         handlePooledTransactions66,
+	NewBlockHashesMsg:             handleNewBlockhashes,             // 处理新的区块哈希消息
+	NewBlockMsg:                   handleNewBlock,                   // 处理新的区块消息
+	TransactionsMsg:               handleTransactions,               // 处理交易消息
+	NewPooledTransactionHashesMsg: handleNewPooledTransactionHashes, // 处理新的交易池中交易哈希消息
+	GetBlockHeadersMsg:            handleGetBlockHeaders66,          // 处理获取区块头消息
+	BlockHeadersMsg:               handleBlockHeaders66,             // 处理区块头消息
+	GetBlockBodiesMsg:             handleGetBlockBodies66,           // 处理获取区块体消息
+	BlockBodiesMsg:                handleBlockBodies66,              // 处理区块体消息
+	GetNodeDataMsg:                handleGetNodeData66,              // 处理获取节点数据消息
+	NodeDataMsg:                   handleNodeData66,                 // 处理节点数据消息
+	GetReceiptsMsg:                handleGetReceipts66,              // 处理获取交易收据消息
+	ReceiptsMsg:                   handleReceipts66,                 // 处理交易收据消息
+	GetPooledTransactionsMsg:      handleGetPooledTransactions66,    // 处理获取交易池中交易消息
+	PooledTransactionsMsg:         handlePooledTransactions66,       // 处理交易池中交易消息
 }
 
+// 处理不同的消息类型
 // handleMessage is invoked whenever an inbound message is received from a remote
 // peer. The remote connection is torn down upon returning any error.
 func handleMessage(backend Backend, peer *Peer) error {

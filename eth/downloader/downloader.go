@@ -377,7 +377,7 @@ func (d *Downloader) UnregisterPeer(id string) error {
 // Synchronise tries to sync up our local blockchain with a remote peer, both
 // adding various sanity checks and wrapping it with various log entries.
 func (d *Downloader) Synchronise(id string, head common.Hash, td *big.Int, mode SyncMode) error {
-	err := d.synchronise(id, head, td, mode)
+	err := d.synchronise(id, head, td, mode) // 开始同步
 
 	switch err {
 	case nil, errBusy, errCanceled:
@@ -386,6 +386,8 @@ func (d *Downloader) Synchronise(id string, head common.Hash, td *big.Int, mode 
 	if errors.Is(err, errInvalidChain) || errors.Is(err, errBadPeer) || errors.Is(err, errTimeout) ||
 		errors.Is(err, errStallingPeer) || errors.Is(err, errUnsyncedPeer) || errors.Is(err, errEmptyHeaderSet) ||
 		errors.Is(err, errPeersUnavailable) || errors.Is(err, errTooOld) || errors.Is(err, errInvalidAncestor) {
+
+		fmt.Println("🍾⭕ 历史块数据同步失败, 删除Peer, 并开始重试...", "peer", id, "err", err)
 		log.Warn("Synchronisation failed, dropping peer", "peer", id, "err", err)
 		if d.dropPeer == nil {
 			// The dropPeer method is nil when `--copydb` is used for a local copy.
@@ -415,6 +417,7 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 	defer atomic.StoreInt32(&d.synchronising, 0)
 
 	// Post a user notification of the sync (only once per session)
+	fmt.Printf("🍾 历史块数据开始同步....")
 	if atomic.CompareAndSwapInt32(&d.notified, 0, 1) {
 		log.Info("Block synchronisation started")
 	}

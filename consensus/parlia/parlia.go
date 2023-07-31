@@ -1,5 +1,12 @@
 package parlia
 
+/////////////////////////
+// Parlia.go文件是Go-Ethereum中的一个文件,它是用于实现共识机制中的Parlia算法的。
+// Parlia算法是一种基于投票的共识算法,用于决定区块链网络中的主节点。
+// 该文件中的代码实现了Parlia算法的逻辑和功能,包括节点的选举、投票、验证和确认等操作。
+// 通过使用Parlia.go文件,区块链网络可以实现分布式的共识机制,确保网络中的节点能够就区块的顺序和状态达成一致,从而保证网络的安全性和可靠性。
+/////////////////////////
+
 import (
 	"bytes"
 	"context"
@@ -1121,6 +1128,11 @@ func (p *Parlia) Finalize(chain consensus.ChainHeaderReader, header *types.Heade
 	return nil
 }
 
+// ⭐ 在 miner/worker.go 的generateWork方法中fillTransactions之后调用
+// FinalizeAndAssemble 方法的作用是将区块链网络中的投票结果进行最终确认,并组装成最终的区块。
+// 具体来说,FinalizeAndAssemble 方法首先会检查投票结果是否满足达成共识的条件。如果投票结果满足条件,它将调用 Assemble 方法来组装区块。
+// Assemble 方法会根据投票结果,从待处理的交易中选择合适的交易,并将这些交易打包成一个区块。然后,它会对区块进行签名和验证,确保区块的完整性和有效性。最后,它会将组装好的区块广播到区块链网络中,供其他节点进行验证和同步。
+// 通过 FinalizeAndAssemble 方法,Parlia 算法能够将投票结果转化为最终的区块,并确保区块链网络中的节点能够达成一致,从而实现共识机制。这有助于保证区块链网络的安全性和可靠性。
 // FinalizeAndAssemble implements consensus.Engine, ensuring no uncles are set,
 // nor block rewards given, and returns the final block.
 func (p *Parlia) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB,
@@ -1139,6 +1151,7 @@ func (p *Parlia) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *
 			log.Error("init contract failed")
 		}
 	}
+	// 根据当前区块的难度判断是否需要进行惩罚操作。如果当前区块不是 Plato 时间戳，且最近的投票结果中没有签署当前被破坏验证人，则进行投票者的惩罚操作。
 	if header.Difficulty.Cmp(diffInTurn) != 0 {
 		number := header.Number.Uint64()
 		snap, err := p.snapshot(chain, number-1, header.ParentHash, nil)
@@ -1165,7 +1178,7 @@ func (p *Parlia) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *
 			}
 		}
 	}
-
+	// 对当前的验证人节点进行奖励分配操作
 	err := p.distributeIncoming(p.val, state, header, cx, &txs, &receipts, nil, &header.GasUsed, true)
 	if err != nil {
 		return nil, nil, err
@@ -1177,10 +1190,12 @@ func (p *Parlia) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *
 		}
 	}
 
+	// 检查系统交易的 gas 消耗是否超过了 gas 限制
 	// should not happen. Once happen, stop the node is better than broadcast the block
 	if header.GasLimit < header.GasUsed {
 		return nil, nil, errors.New("gas consumption of system txs exceed the gas limit")
 	}
+	// 计算整个状态树的根哈希，并创建一个新的区块对象。
 	header.UncleHash = types.CalcUncleHash(nil)
 	var blk *types.Block
 	var rootHash common.Hash
@@ -1195,8 +1210,10 @@ func (p *Parlia) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *
 		wg.Done()
 	}()
 	wg.Wait()
+	// 设置区块的根哈希。
 	blk.SetRoot(rootHash)
 	// Assemble and return the final block for sealing
+	// 返回最终组装完成的区块、收据列表和空的错误
 	return blk, receipts, nil
 }
 
@@ -1295,17 +1312,22 @@ func (p *Parlia) Delay(chain consensus.ChainReader, header *types.Header, leftOv
 	return &delay
 }
 
+// 该方法的作用是使用本地的签名凭证尝试创建一个封闭的区块。
+// 在创建之前，会进行一些判断和验证，如判断是否在允许的时间和条件下进行签署、验证人是否被授权签署区块等。
+// 然后，在一定的延迟时间后进行签名并将带有签名的区块发送到结果通道。
 // Seal implements consensus.Engine, attempting to create a sealed block using
 // the local signing credentials.
 func (p *Parlia) Seal(chain consensus.ChainHeaderReader, block *types.Block, results chan<- *types.Block, stop <-chan struct{}) error {
-	header := block.Header()
+	header := block.Header() // 从传入的 block 中获取区块头部信息
 
 	// Sealing the genesis block is not supported
+	// 对于创世块不支持封闭操作，返回错误信息。
 	number := header.Number.Uint64()
 	if number == 0 {
 		return errUnknownBlock
 	}
 	// For 0-period chains, refuse to seal empty blocks (no reward but would spin sealing)
+	// 如果链的周期为 0 且区块中没有交易内容，则暂停封闭操作并等待交易出现。
 	if p.config.Period == 0 && len(block.Transactions()) == 0 {
 		log.Info("Sealing paused, waiting for transactions")
 		return nil
@@ -1315,16 +1337,19 @@ func (p *Parlia) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 	val, signFn := p.val, p.signFn
 	p.lock.RUnlock()
 
+	// 获取当前区块的前一个区块的状态快照
 	snap, err := p.snapshot(chain, number-1, header.ParentHash, nil)
 	if err != nil {
 		return err
 	}
 
+	// 如果当前验证人不被授权签署区块，则返回错误信息
 	// Bail out if we're unauthorized to sign a block
 	if _, authorized := snap.Validators[val]; !authorized {
 		return errUnauthorizedValidator(val.String())
 	}
 
+	// 如果当前验证人最近曾经签署过区块，则等待其他验证人签署。
 	// If we're amongst the recent signers, wait for the next block
 	if snap.SignRecently(val) {
 		log.Info("Signed recently, must wait for others")
@@ -1338,6 +1363,9 @@ func (p *Parlia) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 
 	// Wait until sealing is terminated or delay timeout.
 	log.Trace("Waiting for slot to sign and propagate", "delay", common.PrettyDuration(delay))
+
+	// 启动一个 goroutine，在延迟时间后进行签署操作。
+	// 在延迟时间内，如果收到终止信号或者延迟时间到达，则进行签名和组装投票证明。
 	go func() {
 		select {
 		case <-stop:
@@ -1345,6 +1373,7 @@ func (p *Parlia) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 		case <-time.After(delay):
 		}
 
+		// 如果组装投票证明失败，则打印错误日志。
 		err := p.assembleVoteAttestation(chain, header)
 		if err != nil {
 			/* If the vote attestation can't be assembled successfully, the blockchain won't get
@@ -1353,6 +1382,7 @@ func (p *Parlia) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 		}
 
 		// Sign all the things!
+		// 然后使用签名对区块头部进行签署。
 		sig, err := signFn(accounts.Account{Address: val}, accounts.MimetypeParlia, ParliaRLP(header, p.chainConfig.ChainID))
 		if err != nil {
 			log.Error("Sign for the block header failed when sealing", "err", err)
@@ -1360,6 +1390,7 @@ func (p *Parlia) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 		}
 		copy(header.Extra[len(header.Extra)-extraSeal:], sig)
 
+		// 如果需要等待当前收到的区块进行处理，则等待一段时间。
 		if p.shouldWaitForCurrentBlockProcess(chain, header, snap) {
 			log.Info("Waiting for received in turn block to process")
 			select {
@@ -1375,6 +1406,7 @@ func (p *Parlia) Seal(chain consensus.ChainHeaderReader, block *types.Block, res
 			}
 		}
 
+		// 最后将带有签名的区块发送到结果通道。
 		select {
 		case results <- block.WithSeal(header):
 		default:
@@ -1657,6 +1689,7 @@ func (p *Parlia) getSystemMessage(from, toAddress common.Address, data []byte, v
 	}
 }
 
+// 这个方法与 core/state_processor.go的 applyTransaction区别是????
 func (p *Parlia) applyTransaction(
 	msg callmsg,
 	state *state.StateDB,
@@ -1665,16 +1698,20 @@ func (p *Parlia) applyTransaction(
 	txs *[]*types.Transaction, receipts *[]*types.Receipt,
 	receivedTxs *[]*types.Transaction, usedGas *uint64, mining bool,
 ) (err error) {
+	// 从StateObject中获取发送方地址的 nonce 值
 	nonce := state.GetNonce(msg.From())
+	// 构建一个Tx
 	expectedTx := types.NewTransaction(nonce, *msg.To(), msg.Value(), msg.Gas(), msg.GasPrice(), msg.Data())
+	// 计算预期交易的哈希值 expectedHash
 	expectedHash := p.signer.Hash(expectedTx)
 
 	if msg.From() == p.val && mining {
-		expectedTx, err = p.signTxFn(accounts.Account{Address: msg.From()}, expectedTx, p.chainConfig.ChainID)
+		expectedTx, err = p.signTxFn(accounts.Account{Address: msg.From()}, expectedTx, p.chainConfig.ChainID) // 对预期交易进行签名
 		if err != nil {
 			return err
 		}
 	} else {
+		// 否则,从 receivedTxs 中获取第一个交易,检查其哈希值是否与预期哈希值相等。若不相等,返回错误；否则,将该交易作为预期交易。
 		if receivedTxs == nil || len(*receivedTxs) == 0 || (*receivedTxs)[0] == nil {
 			return errors.New("supposed to get a actual transaction, but get none")
 		}
@@ -1693,16 +1730,24 @@ func (p *Parlia) applyTransaction(
 		// move to next
 		*receivedTxs = (*receivedTxs)[1:]
 	}
+	// 准备处理预期交易的状态变更
 	state.Prepare(expectedTx.Hash(), len(*txs))
+	// EVM执行预期交易,并记录Gas使用量和可能出现的错误。
 	gasUsed, err := applyMessage(msg, state, header, p.chainConfig, chainContext)
 	if err != nil {
 		return err
 	}
+	// 将预期交易加入到已执行交易列表中, 并生成交易收据,将其加入到收据列表中。
 	*txs = append(*txs, expectedTx)
 	var root []byte
+	// 检查当前区块的编号是否处于 Byzantium 阶段，即是否已经过了 Byzantium 区块的硬分叉。
+	// 在 Byzantium 阶段之前，区块的状态根计算方式与之后的 EIP-158 阶段不同。
 	if p.chainConfig.IsByzantium(header.Number) {
-		state.Finalise(true)
+		state.Finalise(true) // 对状态进行最终化处理并更新状态根哈希值
 	} else {
+		// 检查当前区块是否已经过了 EIP-158 区块的硬分叉
+		// 使用 IntermediateRoot 方法计算当前状态的中间根哈希值，并将其转换为字节切片。
+		// 中间根是在执行交易过程中状态变更的中间状态根，稍后会被进一步处理以得到最终状态根。
 		root = state.IntermediateRoot(p.chainConfig.IsEIP158(header.Number)).Bytes()
 	}
 	*usedGas += gasUsed
@@ -1717,6 +1762,7 @@ func (p *Parlia) applyTransaction(
 	receipt.BlockNumber = header.Number
 	receipt.TransactionIndex = uint(state.TxIndex())
 	*receipts = append(*receipts, receipt)
+	// 更新stateObject的 nonce 值, 准备处理下一个交易
 	state.SetNonce(msg.From(), nonce+1)
 	return nil
 }
@@ -1923,19 +1969,22 @@ func (m callmsg) Value() *big.Int      { return m.CallMsg.Value }
 func (m callmsg) Data() []byte         { return m.CallMsg.Data }
 
 // apply message
+// 用于执行一条交易消息,并在给定的状态数据库中更新状态
 func applyMessage(
-	msg callmsg,
-	state *state.StateDB,
-	header *types.Header,
-	chainConfig *params.ChainConfig,
-	chainContext core.ChainContext,
+	msg callmsg, // 要执行的交易调用消息
+	state *state.StateDB, // 区块链状态的数据库,用于处理交易执行时的状态更改
+	header *types.Header, // 当前区块头
+	chainConfig *params.ChainConfig, // 区块链的配置参数
+	chainContext core.ChainContext, // 区块链上下文
 ) (uint64, error) {
 	// Create a new context to be used in the EVM environment
-	context := core.NewEVMBlockContext(header, chainContext, nil)
+	context := core.NewEVMBlockContext(header, chainContext, nil) // 创建一个新的 EVM 块上 context
 	// Create a new environment which holds all relevant information
 	// about the transaction and calling mechanisms.
+	// 使用发送者地址和GasPrice创建一个新的 EVM 环境 vmenv,其中包含有关交易和调用机制的所有相关信息。
 	vmenv := vm.NewEVM(context, vm.TxContext{Origin: msg.From(), GasPrice: big.NewInt(0)}, state, chainConfig, vm.Config{})
 	// Apply the transaction to the current state (included in the env)
+	// 执行交易调用,传入发送者账户引用、接收者地址、交易数据、GasLimit和交易价值等参数, 返回 执行结果、实际消耗的Gas
 	ret, returnGas, err := vmenv.Call(
 		vm.AccountRef(msg.From()),
 		*msg.To(),
@@ -1946,5 +1995,5 @@ func applyMessage(
 	if err != nil {
 		log.Error("apply message failed", "msg", string(ret), "err", err)
 	}
-	return msg.Gas() - returnGas, err
+	return msg.Gas() - returnGas, err // gasUsed
 }
