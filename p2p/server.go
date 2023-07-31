@@ -509,9 +509,11 @@ func (srv *Server) Start() (err error) {
 			return err
 		}
 	}
+	// 启用节点发现
 	if err := srv.setupDiscovery(); err != nil {
 		return err
 	}
+	// 启用p2p拨号调度器
 	srv.setupDialScheduler()
 
 	srv.loopWG.Add(1)
@@ -563,6 +565,8 @@ func (srv *Server) setupLocalNode() error {
 	return nil
 }
 
+// 启动节点发现
+// 1. 添加已知p2p节点 2. 启动UDP接收enode信息 3. next启动定期p2p拨号
 func (srv *Server) setupDiscovery() error {
 	srv.discmix = enode.NewFairMix(discmixTimeout)
 
@@ -662,6 +666,7 @@ func (srv *Server) setupDiscovery() error {
 	return nil
 }
 
+// 启用p2p拨号调度器
 func (srv *Server) setupDialScheduler() {
 	config := dialConfig{
 		self:           srv.localnode.ID(),
@@ -807,9 +812,11 @@ running:
 		case c := <-srv.checkpointAddPeer:
 			// At this point the connection is past the protocol handshake.
 			// Its capabilities are known and the remote identity is verified.
+			// eth层协议检查
 			err := srv.addPeerChecks(peers, inboundCount, c)
 			if err == nil {
 				// The handshakes are done and it passed all checks.
+				// 握手完成建立连接
 				p := srv.launchPeer(c)
 				peers[c.node.ID()] = p
 				srv.log.Debug("Adding p2p peer", "peercount", len(peers), "id", p.ID(), "conn", c.flags, "addr", p.RemoteAddr(), "name", p.Name())
@@ -870,6 +877,7 @@ func (srv *Server) postHandshakeChecks(peers map[enode.ID]*Peer, inboundCount in
 	}
 }
 
+// eth层协议检查
 func (srv *Server) addPeerChecks(peers map[enode.ID]*Peer, inboundCount int, c *conn) error {
 	// Drop connections with no matching protocols.
 	if len(srv.Protocols) > 0 && countMatchingProtocols(srv.Protocols, c.caps) == 0 {
@@ -973,6 +981,7 @@ func (srv *Server) checkInboundConn(remoteIP net.IP) error {
 // SetupConn runs the handshakes and attempts to add the connection
 // as a peer. It returns when the connection has been added as a peer
 // or the handshakes have failed.
+// 建立了连接
 func (srv *Server) SetupConn(fd net.Conn, flags connFlag, dialDest *enode.Node) error {
 	// If dialDest is verify node, set verifyConn flags.
 	for _, n := range srv.VerifyNodes {
@@ -1005,6 +1014,7 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *enode.Node) erro
 	}
 
 	// If dialing, figure out the remote public key.
+	// 验证enode公钥
 	if dialDest != nil {
 		dialPubkey := new(ecdsa.PublicKey)
 		if err := dialDest.Load((*enode.Secp256k1)(dialPubkey)); err != nil {
@@ -1015,6 +1025,7 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *enode.Node) erro
 	}
 
 	// Run the RLPx handshake.
+	// 运行 RLPx 握手协议，RLPx 是一种用于以太坊和其他基于以太坊的区块链网络中节点之间进行安全通信的协议。
 	remotePubkey, err := c.doEncHandshake(srv.PrivateKey)
 	if err != nil {
 		srv.log.Trace("Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
@@ -1033,6 +1044,7 @@ func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *enode.Node) erro
 	}
 
 	// Run the capability negotiation handshake.
+	// 运行能力协商握手协议，这是一种协议，用于在通信的两个节点之间协商和确认彼此的功能和支持的协议版本。
 	phs, err := c.doProtoHandshake(srv.ourHandshake)
 	if err != nil {
 		clog.Trace("Failed p2p handshake", "err", err)
@@ -1087,6 +1099,7 @@ func (srv *Server) launchPeer(c *conn) *Peer {
 }
 
 // runPeer runs in its own goroutine for each peer.
+// 运行peer的主循环，并在peer连接建立和断开时发送相应的事件通知
 func (srv *Server) runPeer(p *Peer) {
 	if srv.newPeerHook != nil {
 		srv.newPeerHook(p)
@@ -1099,6 +1112,7 @@ func (srv *Server) runPeer(p *Peer) {
 	})
 
 	// Run the per-peer main loop.
+	// 启动p2p节点的通信loop
 	remoteRequested, err := p.run()
 
 	// Announce disconnect on the main loop to update the peer set.

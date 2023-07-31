@@ -304,9 +304,9 @@ func (c *Conn) Handshake(prv *ecdsa.PrivateKey) (*ecdsa.PublicKey, error) {
 		h   handshakeState
 	)
 	if c.dialDest != nil {
-		sec, err = h.runInitiator(c.conn, prv, c.dialDest)
+		sec, err = h.runInitiator(c.conn, prv, c.dialDest) // 主动拨号
 	} else {
-		sec, err = h.runRecipient(c.conn, prv)
+		sec, err = h.runRecipient(c.conn, prv) // 被动接收
 	}
 	if err != nil {
 		return nil, err
@@ -411,6 +411,7 @@ type authRespV4 struct {
 // it should be called on the listening side of the connection.
 //
 // prv is the local client's private key.
+// 被动接收
 func (h *handshakeState) runRecipient(conn io.ReadWriter, prv *ecdsa.PrivateKey) (s Secrets, err error) {
 	authMsg := new(authMsgV4)
 	authPacket, err := h.readMsg(authMsg, prv, conn)
@@ -511,6 +512,7 @@ func (h *handshakeState) staticSharedSecret(prv *ecdsa.PrivateKey) ([]byte, erro
 // it should be called on the dialing side of the connection.
 //
 // prv is the local client's private key.
+// 主动拨号
 func (h *handshakeState) runInitiator(conn io.ReadWriter, prv *ecdsa.PrivateKey, remote *ecdsa.PublicKey) (s Secrets, err error) {
 	h.initiator = true
 	h.remote = ecies.ImportECDSAPublic(remote)

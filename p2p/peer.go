@@ -14,6 +14,12 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
+// Peer类型代表一个已连接的远程节点。它包含了与该节点通信所需的信息，如连接、协议和事件处理等。通过创建Peer对象，可以与其他节点建立连接并进行通信。
+// PeerEvent类型是在p2p.Server中发生对等节点添加、删除、消息发送和消息接收等事件时触发的事件类型。它提供了事件的详细信息，如事件类型、对等节点的ID、错误信息、协议类型等。
+// NewPeer函数用于创建一个用于测试目的的Peer对象。它接受节点ID、名称和能力列表作为参数，并返回一个已连接的Peer对象。该函数在测试中很有用，用于模拟与其他节点的连接。
+// run方法是Peer类型的一个方法，用于处理与对等节点的通信。它包含了读取和处理消息的循环，以及启动和管理各个协议的功能。该方法运行在一个单独的协程中，并在连接断开或发生错误时返回。
+// handle方法用于处理收到的消息。根据消息的类型，它执行不同的操作。例如，如果收到pingMsg类型的消息，则会回复一个pongMsg类型的消息；如果收到discMsg类型的消息，则会关闭与对等节点的连接。
+
 package p2p
 
 import (
@@ -431,21 +437,22 @@ outer:
 	return result
 }
 
+// 启动给定Peer对象上的所有协议
 func (p *Peer) startProtocols(writeStart <-chan struct{}, writeErr chan<- error) {
 	p.wg.Add(len(p.running))
-	for _, proto := range p.running {
+	for _, proto := range p.running { // 遍历p.running中的每一个协议，为每个协议创建一个协程来运行
 		proto := proto
 		proto.closed = p.closed
-		proto.wstart = writeStart
-		proto.werr = writeErr
+		proto.wstart = writeStart // writeStart是一个只读通道，用来通知协议可以开始运行
+		proto.werr = writeErr     // writeErr是一个只写通道，用来接收协议运行过程中的错误
 		var rw MsgReadWriter = proto
 		if p.events != nil {
-			rw = newMsgEventer(rw, p.events, p.ID(), proto.Name, p.Info().Network.RemoteAddress, p.Info().Network.LocalAddress)
+			rw = newMsgEventer(rw, p.events, p.ID(), proto.Name, p.Info().Network.RemoteAddress, p.Info().Network.LocalAddress) // 创建用于记录协议的事件
 		}
 		p.log.Trace(fmt.Sprintf("Starting protocol %s/%d", proto.Name, proto.Version))
 		go func() {
 			defer p.wg.Done()
-			err := proto.Run(p, rw)
+			err := proto.Run(p, rw) // 运行协议
 			if err == nil {
 				p.log.Trace(fmt.Sprintf("Protocol %s/%d returned", proto.Name, proto.Version))
 				err = errProtocolReturned

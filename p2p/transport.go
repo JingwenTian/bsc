@@ -127,6 +127,7 @@ func (t *rlpxTransport) close(err error) {
 	t.conn.Close()
 }
 
+// 发送握手消息
 func (t *rlpxTransport) doEncHandshake(prv *ecdsa.PrivateKey) (*ecdsa.PublicKey, error) {
 	t.conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	return t.conn.Handshake(prv)
