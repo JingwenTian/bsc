@@ -163,21 +163,32 @@ type blockChain interface {
 }
 
 // TxPoolConfig are the configuration parameters of the transaction pool.
+// 交易池配置
+// 1. 两个重要概念「可执行交易」和「非可执行交易」。
+//   - 可执行交易是指从交易池中择优选出的一部分交易可以被执行，打包到区块中。
+//   - 非可执行交易则相反，任何刚进入交易池的交易均属于非可执行状态，在某一个时刻才会提升为可执行状态。
+//
+// 2. 在交易池中将交易标记为 local 的有多种用途：
+//   - 在本地磁盘存储已发送的交易。这样，本地交易不会丢失，重启节点时可以重新加载到交易池，实时广播出去。
+//   - 可以作为外部程序和以太坊沟通的一个渠道。外部程序只需要监听文件内容变化，则可以获得交易清单。
+//   - local交易可优先于 remote 交易。对交易量的限制等操作，不影响 local 下的账户和交易。
+//
+// 以太坊 geth 节点允许在启动节点时，通过参数修改配置 (通过 geth -h 查看 --txpool.*的一系列配置)
 type TxPoolConfig struct {
-	Locals    []common.Address // Addresses that should be treated by default as local
-	NoLocals  bool             // Whether local transaction handling should be disabled
-	Journal   string           // Journal of local transactions to survive node restarts
-	Rejournal time.Duration    // Time interval to regenerate the local transaction journal
+	Locals    []common.Address // 定义了一组视为local交易的账户地址。任何来自此清单的交易均被视为 local 交易。
+	NoLocals  bool             // 是否禁止local交易处理。默认为 fasle,允许 local 交易。如果禁止，则来自 local 的交易均视为 remote 交易处理。
+	Journal   string           // 存储local交易记录的文件名，默认是 ./transactions.rlp。
+	Rejournal time.Duration    //定期将local交易存储文件中的时间间隔。默认为每小时一次。
 
-	PriceLimit uint64 // Minimum gas price to enforce for acceptance into the pool
-	PriceBump  uint64 // Minimum price bump percentage to replace an already existing transaction (nonce)
+	PriceLimit uint64 // remote交易进入交易池的最低 Price 要求。此设置对 local 交易无效。默认值1。
+	PriceBump  uint64 // 替换交易时所要求的价格上调涨幅比例最低要求。任何低于要求的替换交易均被拒绝。
 
-	AccountSlots uint64 // Number of executable transaction slots guaranteed per account
-	GlobalSlots  uint64 // Maximum number of executable transaction slots for all accounts
-	AccountQueue uint64 // Maximum number of non-executable transaction slots permitted per account
-	GlobalQueue  uint64 // Maximum number of non-executable transaction slots for all accounts
+	AccountSlots uint64 // 当交易池中可执行交易（是已在等待矿工打包的交易）量超标时，允许每个账户可以保留在交易池最低交易数。默认值是 16 笔。
+	GlobalSlots  uint64 // 交易池中所允许的可执行交易量上限，高于上限时将释放部分交易。默认是 4096 笔交易。
+	AccountQueue uint64 // 交易池中单个账户非可执行交易上限，默认是64笔。
+	GlobalQueue  uint64 // 交易池中所有非可执行交易上限，默认1024 笔。
 
-	Lifetime       time.Duration // Maximum amount of time non-executable transaction are queued
+	Lifetime       time.Duration // 允许 remote 的非可执行交易可在交易池存活的最长时间。交易池每分钟检查一次，一旦发现有超期的remote 账户，则移除该账户下的所有非可执行交易。默认为3小时。
 	ReannounceTime time.Duration // Duration for announcing local pending transactions again
 }
 
@@ -296,55 +307,69 @@ type txpoolResetRequest struct {
 
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
 // transactions from the network.
+// 创建一个新的交易池，用于收集、排序和过滤来自网络的传入交易。
 func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, chain blockChain) *TxPool {
 	// Sanitize the input to ensure no vulnerable gas prices are set
+	// 对输入的配置进行清理，以确保没有设置不安全的Gas价格。
 	config = (&config).sanitize()
 
 	// Create the transaction pool with its initial settings
+	// 使用初始设置创建交易池
 	pool := &TxPool{
-		config:          config,
-		chainconfig:     chainconfig,
-		chain:           chain,
-		signer:          types.LatestSigner(chainconfig),
-		pending:         make(map[common.Address]*txList),
-		queue:           make(map[common.Address]*txList),
-		beats:           make(map[common.Address]time.Time),
-		all:             newTxLookup(),
-		chainHeadCh:     make(chan ChainHeadEvent, chainHeadChanSize),
-		reqResetCh:      make(chan *txpoolResetRequest),
-		reqPromoteCh:    make(chan *accountSet),
-		queueTxEventCh:  make(chan *types.Transaction),
-		reorgDoneCh:     make(chan chan struct{}),
-		reorgShutdownCh: make(chan struct{}),
-		initDoneCh:      make(chan struct{}),
-		gasPrice:        new(big.Int).SetUint64(config.PriceLimit),
+		config:          config,                                       // 传入的交易池配置
+		chainconfig:     chainconfig,                                  // 传入的链配置
+		chain:           chain,                                        // 传入的区块链对象
+		signer:          types.LatestSigner(chainconfig),              // 根据链配置创建的签名器
+		pending:         make(map[common.Address]*txList),             // 用于存储待处理的交易列表
+		queue:           make(map[common.Address]*txList),             // 用于存储排队的交易列表
+		beats:           make(map[common.Address]time.Time),           // 用于存储交易的心跳时间
+		all:             newTxLookup(),                                // 交易查找表
+		chainHeadCh:     make(chan ChainHeadEvent, chainHeadChanSize), // 用于接收链头事件的通道
+		reqResetCh:      make(chan *txpoolResetRequest),               // 用于接收重置交易池请求的通道
+		reqPromoteCh:    make(chan *accountSet),                       // 用于接收提升账户优先级请求的通道
+		queueTxEventCh:  make(chan *types.Transaction),                // 用于接收排队交易事件的通道
+		reorgDoneCh:     make(chan chan struct{}),                     // 用于接收重组完成信号的通道
+		reorgShutdownCh: make(chan struct{}),                          // 用于接收重组关闭信号的通道
+		initDoneCh:      make(chan struct{}),                          // 用于接收初始化完成信号的通道
+		gasPrice:        new(big.Int).SetUint64(config.PriceLimit),    // Gas价格限制
 	}
+	// 创建本地账户集合，并将配置中的本地账户添加到集合中。
+	// 🌟 可以设置一组视为local交易的账户地址, 这些地址的交易均被视为 local 交易, 当存在多个节点时可以设置以提高交易优先级
 	pool.locals = newAccountSet(pool.signer)
 	for _, addr := range config.Locals {
 		log.Info("Setting new local account", "address", addr)
 		pool.locals.add(addr)
 	}
+	// 创建按照价格排序的交易列表
 	pool.priced = newTxPricedList(pool.all)
+	// 调用 reset 方法，重置交易池，并使用当前区块头初始化。
 	pool.reset(nil, chain.CurrentBlock().Header())
 
 	// Start the reorg loop early so it can handle requests generated during journal loading.
+	// 启动重组循环，以便在日志加载期间处理生成的请求。
 	pool.wg.Add(1)
 	go pool.scheduleReorgLoop()
 
 	// If local transactions and journaling is enabled, load from disk
+	// 对应本地交易存储，在启动交易池时根据配置开启本地交易存储能力：
 	if !config.NoLocals && config.Journal != "" {
 		pool.journal = newTxJournal(config.Journal)
-
+		// 从磁盘中加载已有交易到交易池
 		if err := pool.journal.load(pool.AddLocals); err != nil {
 			log.Warn("Failed to load transaction journal", "err", err)
 		}
+		// 将交易池中的所有本地交易覆盖journal文件
 		if err := pool.journal.rotate(pool.local()); err != nil {
 			log.Warn("Failed to rotate transaction journal", "err", err)
 		}
 	}
 
+	// 在交易池启动后，将订阅链的区块头事件
+	// 所有进入交易池的交易均需要被校验，最基本的是校验账户余额是否足够支付交易执行。或者 交易 nonce 是否合法。
+	// 在交易池中维护的最新的区块StateDB。当交易池接收到新区块信号时，将立即重置 statedb。
 	// Subscribe events from blockchain and start the main event loop.
 	pool.chainHeadSub = pool.chain.SubscribeChainHeadEvent(pool.chainHeadCh)
+	// 并启动主事件循环
 	pool.wg.Add(1)
 	go pool.loop()
 
@@ -363,7 +388,7 @@ func (pool *TxPool) loop() {
 		report     = time.NewTicker(statsReportInterval)
 		evict      = time.NewTicker(evictionInterval)
 		reannounce = time.NewTicker(reannounceInterval)
-		journal    = time.NewTicker(pool.config.Rejournal)
+		journal    = time.NewTicker(pool.config.Rejournal) // journal本地交易存储计时器
 		// Track the previous head headers for transaction reorgs
 		head = pool.chain.CurrentBlock()
 	)
@@ -377,8 +402,11 @@ func (pool *TxPool) loop() {
 	for {
 		select {
 		// Handle ChainHeadEvent
+		// 开始监听新区块头事件
 		case ev := <-pool.chainHeadCh:
 			if ev.Block != nil {
+				// 接收到事件后，更新 state和处理交易.
+				// 核心是将交易池中已经不符合要求的交易删除并更新整理交易.
 				pool.requestReset(head.Header(), ev.Block.Header())
 				head = ev.Block
 			}
@@ -447,6 +475,8 @@ func (pool *TxPool) loop() {
 			}
 
 		// Handle local transaction journal rotation
+		// journal 并不是保存所有的本地交易以及历史，他仅仅是存储当前交易池中存在的本地交易。
+		// 因此交易池会定期对 journal 文件执行 rotate，将交易池中的本地交易写入journal文件，并丢弃旧数据。
 		case <-journal.C:
 			if pool.journal != nil {
 				pool.mu.Lock()
@@ -476,6 +506,8 @@ func (pool *TxPool) Stop() {
 
 // SubscribeNewTxsEvent registers a subscription of NewTxsEvent and
 // starts sending event to the given channel.
+// 🌟🌟 外部只需要订阅新可执行交易事件，则可实时接受交易。
+// 在 geth 中网络层将订阅交易事件，以便实时广播。
 func (pool *TxPool) SubscribeNewTxsEvent(ch chan<- NewTxsEvent) event.Subscription {
 	return pool.scope.Track(pool.txFeed.Subscribe(ch))
 }
@@ -636,6 +668,7 @@ func (pool *TxPool) local() map[common.Address]types.Transactions {
 	return txs
 }
 
+// 校验交易数据的合法性
 // validateTx checks whether a transaction is valid according to the consensus
 // rules and adheres to some heuristic limits of the local node (price and size).
 func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
@@ -648,15 +681,18 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		return ErrTxTypeNotSupported
 	}
 	// Reject transactions over defined size to prevent DOS attacks
+	// 防止DOS攻击，不允许交易数据超过32KB
 	if uint64(tx.Size()) > txMaxSize {
 		return ErrOversizedData
 	}
 	// Transactions can't be negative. This may never happen using RLP decoded
 	// transactions but may occur if you create a transaction using the RPC.
+	// 不允许交易的转账金额为负数，实际上这次判断难以命中，原因是从外部接收的交易数据属RLP编码，是无法处理负数的。当然这里做一次校验，更加保险。
 	if tx.Value().Sign() < 0 {
 		return ErrNegativeValue
 	}
 	// Ensure the transaction doesn't exceed the current block limit gas.
+	// 交易的GAS上限b不能超过区块GAS限制
 	if pool.currentMaxGas < tx.Gas() {
 		return ErrGasLimit
 	}
@@ -672,6 +708,7 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		return ErrTipAboveFeeCap
 	}
 	// Make sure the transaction is signed properly.
+	// 每笔交易都需要携带交易签名信息，并从签名中解析出签名者地址。只有合法的签名才能成功解析出签名者。一旦解析失败拒绝此交易。
 	from, err := types.Sender(pool.signer, tx)
 	if err != nil {
 		return ErrInvalidSender
@@ -681,11 +718,13 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		return ErrUnderpriced
 	}
 	// Ensure the transaction adheres to nonce ordering
+	// 判断账户Nonce与交易的Nonce
 	if pool.currentState.GetNonce(from) > tx.Nonce() {
 		return ErrNonceTooLow
 	}
 	// Transactor should have enough funds to cover the costs
 	// cost == V + GP * GL
+	// 检查该账户余额，只有账户资产充足时，才允许交易继续
 	balance := pool.currentState.GetBalance(from)
 	if balance.Cmp(tx.Cost()) < 0 {
 		return ErrInsufficientFunds
@@ -705,7 +744,8 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		}
 	}
 
-	// Ensure the transaction has more gas than the basic tx fee.
+	// Ensure the transaction has more gas than the basic tx fee.'
+	// 检查交易所设置的Gas上限是否正确
 	intrGas, err := IntrinsicGas(tx.Data(), tx.AccessList(), tx.To() == nil, true, pool.istanbul)
 	if err != nil {
 		return err
@@ -723,6 +763,7 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 // If a newly added transaction is marked as local, its sending account will be
 // be added to the allowlist, preventing any associated transaction from being dropped
 // out of the pool due to pricing constraints.
+// 交易进入交易池分三步走：校验、入队列、容量检查
 func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err error) {
 	// If the transaction is already known, discard it
 	hash := tx.Hash()
@@ -736,6 +777,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err e
 	isLocal := local || pool.locals.containsTx(tx)
 
 	// If the transaction fails basic validation, discard it
+	// 任何交易进入交易池之前均需要校验交易数据的合法性, 如果交易校验失败则拒绝此交易。
 	if err := pool.validateTx(tx, isLocal); err != nil {
 		//log.Trace("Discarding invalid transaction", "hash", hash, "err", err)
 		invalidTxMeter.Mark(1)
@@ -746,8 +788,11 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err e
 	from, _ := types.Sender(pool.signer, tx)
 
 	// If the transaction pool is full, discard underpriced transactions
+	// 在进入交易队列前，将判断所有交易队列 all 是否已经达到上限。
+	// 如果到底上限，则需要从交易池或者当前交易中移除优先级最低交易 。
 	if uint64(pool.all.Slots()+numSlots(tx)) > pool.config.GlobalSlots+pool.config.GlobalQueue {
 		// If the new transaction is underpriced, don't accept it
+		// 首先，本地交易是受保护的，因此如果交易来自remote 时，将检查该交易的价格是否是整个交易池中属于最低价格的。如果是，则拒绝该交易
 		if !isLocal && pool.priced.Underpriced(tx) {
 			//log.Trace("Discarding underpriced transaction", "hash", hash, "gasTipCap", tx.GasTipCap(), "gasFeeCap", tx.GasFeeCap())
 			underpricedTxMeter.Mark(1)
@@ -766,6 +811,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err e
 		// New transaction is better than our worse ones, make room for it.
 		// If it's a local transaction, forcibly discard all available transactions.
 		// Otherwise if we can't make enough room for new one, abort the operation.
+		// 在加入此交易前，将从交易队列 all 中删除价格最低的一部分交易
 		drop, success := pool.priced.Discard(pool.all.Slots()-int(pool.config.GlobalSlots+pool.config.GlobalQueue)+numSlots(tx), isLocal)
 
 		// Special case, we still can't make the room for the new remote one.
@@ -805,22 +851,25 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err e
 	}
 
 	// Try to replace an existing transaction in the pending pool
+	// 新交易默认是要在非可执行队列中等待指示，但是一种情况时，如果该 from 的可执行队列中存在一个相同 nonce 的交易时，需要进一步识别是否能替换
 	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
 		// Nonce already pending, check if required price bump is met
+		// 交易池的默认配置（pool.config.PriceBump）是10%，只有上调10%手续费的交易才允许替换掉已在等待执行的交易
 		inserted, old := list.Add(tx, pool.config.PriceBump)
 		if !inserted {
 			pendingDiscardMeter.Mark(1)
 			return false, ErrReplaceUnderpriced
 		}
+		// 移除旧交易，并将交易同步存储到 all 交易内存池中
 		// New transaction is better, replace old one
 		if old != nil {
 			pool.all.Remove(old.Hash())
 			pool.priced.Removed(1)
 			pendingReplaceMeter.Mark(1)
 		}
-		pool.all.Add(tx, isLocal)
+		pool.all.Add(tx, isLocal) // 将交易添加到交易池(local/remote)
 		pool.priced.Put(tx, isLocal)
-		pool.journalTx(from, tx)
+		pool.journalTx(from, tx) // 将交易写入到journal文件
 		pool.queueTxEvent(tx)
 		//log.Trace("Pooled new executable transaction", "hash", hash, "from", from, "to", tx.To())
 
@@ -829,11 +878,13 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err e
 		return old != nil, nil
 	}
 	// New transaction isn't replacing a pending one, push into queue
+	// 检查完是否需要替换 pending 交易后，则将交易存入非可执行队列
 	replaced, err = pool.enqueueTx(hash, tx, isLocal, true)
 	if err != nil {
 		return false, err
 	}
 	// Mark local addresses and journal local transactions
+	// 如果交易属于本地交易，但是本地账户集中不存在此 from 时，更新本地账户集
 	if local && !pool.locals.contains(from) {
 		//log.Info("Setting new local account", "address", from)
 		pool.locals.add(from)
@@ -904,11 +955,14 @@ func (pool *TxPool) enqueueTx(hash common.Hash, tx *types.Transaction, local boo
 
 // journalTx adds the specified transaction to the local disk journal if it is
 // deemed to have been sent from a local account.
+// 在新的local 交易进入交易池时，将被实时写入 journal 文件
 func (pool *TxPool) journalTx(from common.Address, tx *types.Transaction) {
 	// Only journal if it's enabled and the transaction is local
+	// 只有属于 local 账户的交易才会被记录
 	if pool.journal == nil || !pool.locals.contains(from) {
 		return
 	}
+	// 将交易实时写入文件流中，相当于实时存储本地交易到磁盘
 	if err := pool.journal.insert(tx); err != nil {
 		log.Warn("Failed to journal local transaction", "err", err)
 	}
@@ -1260,6 +1314,7 @@ func (pool *TxPool) scheduleReorgLoop() {
 	}
 }
 
+// 交易池在重组过程中的一系列操作，包括添加、删除、提升和截断交易，以确保交易池的有效性和一致性。
 // runReorg runs reset and promoteExecutables on behalf of scheduleReorgLoop.
 func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirtyAccounts *accountSet, events map[common.Address]*txSortedMap) {
 	defer func(t0 time.Time) {
@@ -1274,7 +1329,9 @@ func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirt
 		// the flatten operation can be avoided.
 		promoteAddrs = dirtyAccounts.flatten()
 	}
+	// 对交易池进行锁定（Lock），开始执行重组操作。
 	pool.mu.Lock()
+	// 如果 reset 不为空，则执行重组操作，调用 pool.reset 函数进行重组，同时删除变得过时的事件。
 	if reset != nil {
 		// Reset from the old head to the new, rescheduling any reorged transactions
 		pool.reset(reset.oldHead, reset.newHead)
@@ -1292,6 +1349,7 @@ func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirt
 			promoteAddrs = append(promoteAddrs, addr)
 		}
 	}
+	// 对于每个需要 promote 的地址，进行交易的提升。
 	// Check for pending transactions for every account that sent new ones
 	promoted := pool.promoteExecutables(promoteAddrs)
 
@@ -1299,7 +1357,8 @@ func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirt
 	// remove any transaction that has been included in the block or was invalidated
 	// because of another transaction (e.g. higher gas price).
 	if reset != nil {
-		pool.demoteUnexecutables()
+		pool.demoteUnexecutables() // 如果 reset 不为空，则删除无法执行的交易（例如因为其他交易导致的无效）。
+		// 如果新区块头 reset.newHead 存在，则根据伦敦硬分叉（London fork）的状态更新交易池中的基础费用（base fee）或重新建堆（reheap）价格列表（priced list）。
 		if reset.newHead != nil {
 			if pool.chainconfig.IsLondon(new(big.Int).Add(reset.newHead.Number, big.NewInt(1))) {
 				// london fork enabled, reset given the base fee
@@ -1311,6 +1370,7 @@ func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirt
 			}
 		}
 
+		// 更新所有帐户的最新已知待处理事务的 pending nonce。
 		// Update all accounts to the latest known pending nonce
 		nonces := make(map[common.Address]uint64, len(pool.pending))
 		for addr, list := range pool.pending {
@@ -1320,14 +1380,17 @@ func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirt
 		pool.pendingNonces.setAll(nonces)
 	}
 	// Ensure pool.queue and pool.pending sizes stay within the configured limits.
+	// 确保交易池中 queue 和 pending 的大小保持在配置限制内，截断交易队列和待处理事务。
 	pool.truncatePending()
 	pool.truncateQueue()
 
+	// 重置 changesSinceReorg 计数器，并解锁交易池（Unlock）。
 	dropBetweenReorgHistogram.Update(int64(pool.changesSinceReorg))
 	pool.changesSinceReorg = 0 // Reset change counter
 	pool.mu.Unlock()
 
 	// Notify subsystems for newly added transactions
+	// 通知各个子系统有新的交易加入，将新增的交易加入相应的账户事件集合中，并通过发布新交易信号通知外部订阅器。
 	for _, tx := range promoted {
 		addr, _ := types.Sender(pool.signer, tx)
 		if _, ok := events[addr]; !ok {
@@ -1340,6 +1403,10 @@ func (pool *TxPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirt
 		for _, set := range events {
 			txs = append(txs, set.Flatten()...)
 		}
+		// 🚀 发布新交易信号 ...
+		// 订阅 NewTxsEvent 事件有两处:
+		// 1. eth/handler: 在 geth 中网络层将订阅交易事件，以便实时广播
+		// 2. miner/worker: 矿工实时订阅交易，以便将交易打包到区块中
 		pool.txFeed.Send(NewTxsEvent{txs})
 	}
 }
@@ -1438,6 +1505,9 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 // promoteExecutables moves transactions that have become processable from the
 // future queue to the set of pending transactions. During this process, all
 // invalidated transactions (low nonce, low balance) are deleted.
+// 🚀🚀 更新可执行队列
+// 只要有交易加入或者清理出交易池都将立即激活对可执行交易队列的更新
+// 规则是：删除无效和超上限交易、转移一部分、容量控制。是整个交易池中最复杂的部分，也是最核心部分。
 func (pool *TxPool) promoteExecutables(accounts []common.Address) []*types.Transaction {
 	// Track the promoted transactions to broadcast them at once
 	var promoted []*types.Transaction
@@ -1448,7 +1518,10 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) []*types.Trans
 		if list == nil {
 			continue // Just in case someone calls with a non existing account
 		}
+		// [删除旧交易]---------------------------
+
 		// Drop all transactions that are deemed too old (low nonce)
+		// 在新区块来到后，账户的 nonce和账户余额如果变动, 删除所有低于新nonce的交易
 		forwards := list.Forward(pool.currentState.GetNonce(addr))
 		for _, tx := range forwards {
 			hash := tx.Hash()
@@ -1456,6 +1529,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) []*types.Trans
 		}
 		log.Trace("Removed old queued transactions", "count", len(forwards))
 		// Drop all transactions that are too costly (low balance or out of gas)
+		// 根据账户可用余额，来移除交易开销（amount+gasLimit*gasPrice）高于此余额的交易
 		drops, _ := list.Filter(pool.currentState.GetBalance(addr), pool.currentMaxGas)
 		for _, tx := range drops {
 			hash := tx.Hash()
@@ -1464,11 +1538,13 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) []*types.Trans
 		log.Trace("Removed unpayable queued transactions", "count", len(drops))
 		queuedNofundsMeter.Mark(int64(len(drops)))
 
+		// [转移交易或释放]---------------------------
 		// Gather all executable transactions and promote them
+		// 如果queue队列中存在低于 pending 队列的最小nonce的交易, 则可直接转移到pending中
 		readies := list.Ready(pool.pendingNonces.get(addr))
 		for _, tx := range readies {
 			hash := tx.Hash()
-			if pool.promoteTx(addr, hash, tx) {
+			if pool.promoteTx(addr, hash, tx) { // 提升交易优先级: queue->pending
 				promoted = append(promoted, tx)
 			}
 		}
@@ -1476,6 +1552,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) []*types.Trans
 		queuedGauge.Dec(int64(len(readies)))
 
 		// Drop all transactions over the allowed limit
+		// 转移后，该账户的交易可能超过所允许的排队交易笔数，如果超过则直接移除超过上限部分的交易。当然这仅仅针对remote交易。
 		var caps types.Transactions
 		if !pool.locals.contains(addr) {
 			caps = list.Cap(int(pool.config.AccountQueue))
@@ -1504,6 +1581,7 @@ func (pool *TxPool) promoteExecutables(accounts []common.Address) []*types.Trans
 // truncatePending removes transactions from the pending queue if the pool is above the
 // pending limit. The algorithm tries to reduce transaction counts by an approximately
 // equal number for all for accounts with many pending transactions.
+// 检查pending 交易数量
 func (pool *TxPool) truncatePending() {
 	pending := uint64(0)
 	for _, list := range pool.pending {
@@ -1518,6 +1596,7 @@ func (pool *TxPool) truncatePending() {
 	spammers := prque.New(nil)
 	for addr, list := range pool.pending {
 		// Only evict transactions from high rollers
+		// 优先从超上限的账户中移除交易
 		if !pool.locals.contains(addr) && uint64(len(list.txs.items)) > pool.config.AccountSlots {
 			spammers.Push(addr, int64(len(list.txs.items)))
 		}
@@ -1532,9 +1611,11 @@ func (pool *TxPool) truncatePending() {
 		// Equalize balances until all the same or below threshold
 		if len(offenders) > 1 {
 			// Calculate the equalization threshold for all current offenders
+			// 存在一个特殊删除策略，并非直接轮流每个账户，而是通过一个动态阀值控制，阀值控制遍历顺序，存在一定的随机性
 			threshold := len(pool.pending[offender.(common.Address)].txs.items)
 
 			// Iteratively reduce all offenders until below limit or threshold reached
+			// 在移除交易时，并非将某个账户的交易全部删除，而是每个账户轮流删除一笔交易，直到低于交易上限
 			for pending > pool.config.GlobalSlots && len(pool.pending[offenders[len(offenders)-2]].txs.items) > threshold {
 				for i := 0; i < len(offenders)-1; i++ {
 					list := pool.pending[offenders[i]]
@@ -1543,7 +1624,7 @@ func (pool *TxPool) truncatePending() {
 					for _, tx := range caps {
 						// Drop the transaction from the global pools too
 						hash := tx.Hash()
-						pool.all.Remove(hash)
+						pool.all.Remove(hash) // 删除交易
 
 						// Update the account nonce to the dropped transaction
 						pool.pendingNonces.setIfLower(offenders[i], tx.Nonce())
@@ -1561,6 +1642,7 @@ func (pool *TxPool) truncatePending() {
 	}
 
 	// If still above threshold, reduce to limit or min allowance
+	// 如果仍然还超限，则继续采用直接遍历方式，删除交易，直到低于限制
 	if pending > pool.config.GlobalSlots && len(offenders) > 0 {
 		for pending > pool.config.GlobalSlots && uint64(len(pool.pending[offenders[len(offenders)-1]].txs.items)) > pool.config.AccountSlots {
 			for _, addr := range offenders {
@@ -1589,6 +1671,8 @@ func (pool *TxPool) truncatePending() {
 }
 
 // truncateQueue drops the oldes transactions in the queue if the pool is above the global queue limit.
+// 检查 queue 交易数量
+// 交易池对于非可执行交易数量也存在上限控制。如果超过上限，同样需要删除超限部分。
 func (pool *TxPool) truncateQueue() {
 	queued := uint64(0)
 	for _, list := range pool.queue {
@@ -1602,9 +1686,11 @@ func (pool *TxPool) truncateQueue() {
 	addresses := make(addressesByHeartbeat, 0, len(pool.queue))
 	for addr := range pool.queue {
 		if !pool.locals.contains(addr) { // don't drop locals
+			// 在交易进入pending 时会更新账户级的心跳时间，代表账户最后pending交易活动时间
 			addresses = append(addresses, addressByHeartbeat{addr, pool.beats[addr]})
 		}
 	}
+	// 当交易池的交易过多时，以太坊首先根据账户活动时间，从早到晚排列
 	sort.Sort(sort.Reverse(addresses))
 
 	// Drop transactions until the total is below the limit or only locals remain
@@ -1615,6 +1701,7 @@ func (pool *TxPool) truncateQueue() {
 		addresses = addresses[:len(addresses)-1]
 
 		// Drop all transactions if they are less than the overflow
+		// 删除时，如果queue交易笔数不够待删除量时，直接清理该账户所有queue交易
 		if size := uint64(len(list.txs.items)); size <= drop {
 			for _, tx := range list.Flatten() {
 				pool.removeTx(tx.Hash(), true)
@@ -1624,6 +1711,7 @@ func (pool *TxPool) truncateQueue() {
 			continue
 		}
 		// Otherwise drop only last few transactions
+		// 否则逐个删除，直到到达删除任务
 		txs := list.Flatten()
 		for i := len(txs) - 1; i >= 0 && drop > 0; i-- {
 			pool.removeTx(txs[i].Hash(), true)
@@ -1791,11 +1879,12 @@ func (as *accountSet) merge(other *accountSet) {
 //
 // This lookup set combines the notion of "local transactions", which is useful
 // to build upper-level structure.
+// 采用一个 txLookup (内部为map）跟踪所有交易
 type txLookup struct {
 	slots   int
 	lock    sync.RWMutex
-	locals  map[common.Hash]*types.Transaction
-	remotes map[common.Hash]*types.Transaction
+	locals  map[common.Hash]*types.Transaction // 本地交易
+	remotes map[common.Hash]*types.Transaction // 远程交易
 }
 
 // newTxLookup returns a new txLookup structure.

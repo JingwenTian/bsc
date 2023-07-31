@@ -56,12 +56,15 @@ func newTxJournal(path string) *txJournal {
 
 // load parses a transaction journal dump from disk, loading its contents into
 // the specified pool.
+// 在交易池首次启动 journal 时，将主动将journal文件已存储的交易加载到交易池
 func (journal *txJournal) load(add func([]*types.Transaction) []error) error {
 	// Skip the parsing if the journal file doesn't exist at all
+	// 如果文件不存在则退出
 	if _, err := os.Stat(journal.path); os.IsNotExist(err) {
 		return nil
 	}
 	// Open the journal for loading any past transactions
+	// 否则 Open 文件，获得 input 文件流
 	input, err := os.Open(journal.path)
 	if err != nil {
 		return err
@@ -73,12 +76,15 @@ func (journal *txJournal) load(add func([]*types.Transaction) []error) error {
 	defer func() { journal.writer = nil }()
 
 	// Inject all transactions from the journal into the pool
+	// 初始化 rlp 内容流 ，为连续解码做准备
 	stream := rlp.NewStream(input, 0)
 	total, dropped := 0, 0
 
 	// Create a method to load a limited batch of transactions and bump the
 	// appropriate progress counters. Then use this method to load all the
 	// journaled transactions in small-ish batches.
+	// 将交易一批次加入到交易池，并获得交易池的每笔交易的处理情况。
+	// 如果交易加入失败，则进行计数
 	loadBatch := func(txs types.Transactions) {
 		for _, err := range add(txs) {
 			if err != nil {
@@ -94,7 +100,9 @@ func (journal *txJournal) load(add func([]*types.Transaction) []error) error {
 	for {
 		// Parse the next transaction and terminate on error
 		tx := new(types.Transaction)
+		// 从 stream 中一笔笔地解码出交易
 		if err = stream.Decode(tx); err != nil {
+			// 当然在遍历结束时（err==io.EOF）,也需要将当前批次中的交易载入
 			if err != io.EOF {
 				failure = err
 			}
@@ -105,8 +113,10 @@ func (journal *txJournal) load(add func([]*types.Transaction) []error) error {
 		}
 		// New transaction parsed, queue up for later, import if threshold is reached
 		total++
-
+		// 交易并非单笔直接载入交易池，而是采用批量提交模式，每 1024 笔交易提交一次
 		if batch = append(batch, tx); batch.Len() > 1024 {
+			// 批量写入，有利于降低交易池在每次写入交易后的更新
+			// 一个批次只需要更新（排序与超限处理等）一次
 			loadBatch(batch)
 			batch = batch[:0]
 		}
@@ -137,6 +147,7 @@ func (journal *txJournal) rotate(all map[common.Address]types.Transactions) erro
 		}
 		journal.writer = nil
 	}
+	// 在 rotate 中，并非直接覆盖。而是先创建另一个新文件，将所有交易RLP编码写入此文件
 	// Generate a new journal with the contents of the current pool
 	replacement, err := os.OpenFile(journal.path+".new", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
@@ -155,6 +166,7 @@ func (journal *txJournal) rotate(all map[common.Address]types.Transactions) erro
 	replacement.Close()
 
 	// Replace the live journal with the newly generated one
+	// 写入完毕，将此文件直接移动（重命名），已覆盖原 journal 文件。
 	if err = os.Rename(journal.path+".new", journal.path); err != nil {
 		return err
 	}
