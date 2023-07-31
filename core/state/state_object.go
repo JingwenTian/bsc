@@ -479,6 +479,7 @@ func (s *StateObject) CommitTrie(db Database) (int, error) {
 
 // AddBalance adds amount to s's balance.
 // It is used to add funds to the destination account of a transfer.
+// 账户余额(StateAccount.Balance) 递增
 func (s *StateObject) AddBalance(amount *big.Int) {
 	// EIP161: We must check emptiness for the objects such that the account
 	// clearing (0,0,0 objects) can take effect.
@@ -493,6 +494,7 @@ func (s *StateObject) AddBalance(amount *big.Int) {
 
 // SubBalance removes amount from s's balance.
 // It is used to remove funds from the origin account of a transfer.
+// 账户余额(StateAccount.Balance) 递减
 func (s *StateObject) SubBalance(amount *big.Int) {
 	if amount.Sign() == 0 {
 		return
@@ -500,6 +502,7 @@ func (s *StateObject) SubBalance(amount *big.Int) {
 	s.SetBalance(new(big.Int).Sub(s.Balance(), amount))
 }
 
+// 账户余额(StateAccount.Balance) 重置
 func (s *StateObject) SetBalance(amount *big.Int) {
 	s.db.journal.append(balanceChange{
 		account: &s.address,

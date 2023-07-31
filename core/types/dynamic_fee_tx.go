@@ -22,16 +22,28 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+// DynamicFeeTx 相较于 LegacyTx 具有以下优势：
+// 1. EIP-1559支持： DynamicFeeTx 是基于以太坊 EIP-1559 提案的新型交易类型。EIP-1559 提案旨在改进以太坊的交易费用机制，使燃料费用更加稳定和可预测。与传统的基于燃料价格的拍卖机制不同，EIP-1559 引入了基础燃料费用（Base Fee）和优先级燃料费用（Priority Fee）的概念，使交易费用更加合理和公平。
+// 2. 动态燃料费用： DynamicFeeTx 允许发送方在交易中指定优先级燃料费用和最大燃料费用，从而更好地管理交易费用和优先级。矿工会根据发送方指定的最大燃料费用来决定是否打包交易，从而提高了矿工在交易费用市场中的收益。
+// 3. 更好的交易优先级： DynamicFeeTx 的优先级由发送方通过设置优先级燃料费用来指定，而不再依赖于燃料价格的拍卖。这意味着发送方可以更精确地控制交易的优先级，从而更快地得到确认。
+// 4. 更稳定的区块燃料限制： EIP-1559 引入的基础燃料费用机制有助于保持每个区块的平均燃料使用量接近区块的燃料限制。这样可以减少区块拥堵，提高整体网络的吞吐量和稳定性。
+// 5. 更简化的交易费用计算： DynamicFeeTx 中的燃料费用计算更简单直观，只需指定优先级燃料费用和最大燃料费用即可，不再需要进行复杂的燃料价格拍卖。
+// 总体而言，DynamicFeeTx 基于 EIP-1559 提案改进了以太坊交易的费用机制，使交易费用更加合理、稳定和可预测，同时提供更好的交易优先级控制，从而为用户和矿工带来更好的交易体验和经济激励。
+
+// 以太坊中的动态手续费交易
+// DynamicFeeTx 结构体包含了动态手续费交易的所有信息，这些信息用于发送和验证以太坊网络中的交易，并确保交易的有效性和安全性。
+// 动态手续费交易是以太坊 EIP-1559 提案引入的新类型交易，其中燃料费用由发送方在交易中指定，以更好地管理网络拥堵和燃料费用市场。
+
 type DynamicFeeTx struct {
-	ChainID    *big.Int
-	Nonce      uint64
-	GasTipCap  *big.Int // a.k.a. maxPriorityFeePerGas
-	GasFeeCap  *big.Int // a.k.a. maxFeePerGas
-	Gas        uint64
-	To         *common.Address `rlp:"nil"` // nil means contract creation
-	Value      *big.Int
-	Data       []byte
-	AccessList AccessList
+	ChainID    *big.Int        // 交易所属的链ID
+	Nonce      uint64          // 发送方账户的交易计数器，用于标识账户的交易顺序
+	GasTipCap  *big.Int        // a.k.a. maxPriorityFeePerGas 交易发送方愿意支付的最高优先燃料费用（以太），用于提高交易的优先级，也称为 maxPriorityFeePerGas
+	GasFeeCap  *big.Int        // a.k.a. maxFeePerGas 交易发送方愿意支付的最高燃料费用（以太），用于限制交易费用，也称为 maxFeePerGas。
+	Gas        uint64          // 交易所需的Gas数量
+	To         *common.Address `rlp:"nil"` // nil means contract creation 交易的接收地址，如果为 nil，则表示合约创建交易，否则为普通转账交易。
+	Value      *big.Int        // 交易转移的以太币数量。
+	Data       []byte          // 交易的数据字段，用于存储智能合约的调用数据。
+	AccessList AccessList      // 交易的访问列表，指定了交易涉及的账户和存储槽。
 
 	// Signature values
 	V *big.Int `json:"v" gencodec:"required"`

@@ -23,10 +23,13 @@ import (
 )
 
 // LegacyTx is the transaction data of regular Ethereum transactions.
+// 普通以太坊交易的结构体，也称为“遗留交易”（Legacy Transaction）, 即在 EIP-1559 提案之前使用的交易类型。
+// 在这种类型的交易中，燃料费用由发送方在交易中指定，矿工会优先选择燃料费用较高的交易进行打包，从而提高交易的优先级。
+// 这些交易被称为“遗留交易”，因为它们不包含 EIP-1559 中引入的动态燃料费用概念，而在 EIP-1559 之后，交易被分为动态手续费交易（Dynamic Fee Transaction）和遗留交易两种类型。
 type LegacyTx struct {
-	Nonce    uint64          // nonce of sender account
-	GasPrice *big.Int        // wei per gas
-	Gas      uint64          // gas limit
+	Nonce    uint64          // nonce of sender account 发送方账户的交易计数器，用于标识账户的交易顺序。
+	GasPrice *big.Int        // wei per gas 发送方愿意支付的每单位燃料的费用（以太），用于确定交易的优先级。
+	Gas      uint64          // gas limit 交易所需的燃料数量，即燃料限制。
 	To       *common.Address `rlp:"nil"` // nil means contract creation
 	Value    *big.Int        // wei amount
 	Data     []byte          // contract invocation input data

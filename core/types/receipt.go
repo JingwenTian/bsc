@@ -56,26 +56,31 @@ type OriginalDataAndReceipt struct {
 }
 
 // Receipt represents the results of a transaction.
+// 用于记录交易的执行结果和相关信息，包括交易状态、日志记录、区块信息等。它是以太坊区块链中存储和处理交易结果的重要数据结构。
+// 回执信息分为三部分：共识信息、交易信息、区块信息。
 type Receipt struct {
+	// 共识信息
 	// Consensus fields: These fields are defined by the Yellow Paper
-	Type              uint8  `json:"type,omitempty"`
-	PostState         []byte `json:"root"`
-	Status            uint64 `json:"status"`
-	CumulativeGasUsed uint64 `json:"cumulativeGasUsed" gencodec:"required"`
-	Bloom             Bloom  `json:"logsBloom"         gencodec:"required"`
-	Logs              []*Log `json:"logs"              gencodec:"required"`
+	Type              uint8  `json:"type,omitempty"`                        // 交易类型，用于标识交易的类型。在大多数情况下，此字段为 0，表示普通交易，但在特殊情况下可能具有其他值，例如合约创建交易。
+	PostState         []byte `json:"root"`                                  // 交易执行后的状态根（State Root），用于记录交易执行后的账户状态。
+	Status            uint64 `json:"status"`                                // 交易执行的状态，通常为 1 表示成功，0 表示失败。
+	CumulativeGasUsed uint64 `json:"cumulativeGasUsed" gencodec:"required"` // 累计Gas使用量，表示当前交易及之前所有交易所使用的总Gas数量。
+	Bloom             Bloom  `json:"logsBloom"         gencodec:"required"` // 布隆过滤器，用于快速检索与交易相关的日志。(从 Logs中提取的事件布隆过滤器，用于快速检测某主题的事件是否存在于Logs中)
+	Logs              []*Log `json:"logs"              gencodec:"required"` // 交易执行产生的日志记录列表。
 
+	// 交易信息
 	// Implementation fields: These fields are added by geth when processing a transaction.
 	// They are stored in the chain database.
-	TxHash          common.Hash    `json:"transactionHash" gencodec:"required"`
-	ContractAddress common.Address `json:"contractAddress"`
-	GasUsed         uint64         `json:"gasUsed" gencodec:"required"`
+	TxHash          common.Hash    `json:"transactionHash" gencodec:"required"` // 交易的哈希值，用于唯一标识一笔交易。
+	ContractAddress common.Address `json:"contractAddress"`                     // 合约创建交易的合约地址，如果当前交易不是合约创建交易，则为零地址; 当这笔交易是部署新合约时，记录新合约的地址
+	GasUsed         uint64         `json:"gasUsed" gencodec:"required"`         // 交易实际使用的燃料数量。
 
+	// 区块信息
 	// Inclusion information: These fields provide information about the inclusion of the
 	// transaction corresponding to this receipt.
-	BlockHash        common.Hash `json:"blockHash,omitempty"`
-	BlockNumber      *big.Int    `json:"blockNumber,omitempty"`
-	TransactionIndex uint        `json:"transactionIndex"`
+	BlockHash        common.Hash `json:"blockHash,omitempty"`   // 交易所在区块的哈希值。
+	BlockNumber      *big.Int    `json:"blockNumber,omitempty"` // 交易所在区块的块号。
+	TransactionIndex uint        `json:"transactionIndex"`      // 交易在区块中的索引位置。
 }
 
 type receiptMarshaling struct {

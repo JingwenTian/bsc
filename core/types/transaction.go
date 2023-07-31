@@ -53,6 +53,8 @@ type Transaction struct {
 	time  time.Time // Time first seen locally (spam avoidance)
 
 	// caches
+	// 三个缓存项：交易哈希值(hash)、交易大小(size)和交易发送方(from)。缓存的原因是使用频次高且CPU计算量大
+	// atomic.Value原子操作对象, 这样可防止并发引起多次哈希计算
 	hash atomic.Value
 	size atomic.Value
 	from atomic.Value
@@ -91,6 +93,9 @@ type TxData interface {
 func (tx *Transaction) Time() time.Time {
 	return tx.time
 }
+
+// ---------------------------
+// RLP接口实现方法
 
 // EncodeRLP implements rlp.Encoder
 func (tx *Transaction) EncodeRLP(w io.Writer) error {
@@ -258,6 +263,7 @@ func (tx *Transaction) Type() uint8 {
 // ChainId returns the EIP155 chain ID of the transaction. The return value will always be
 // non-nil. For legacy transactions which are not replay-protected, the return value is
 // zero.
+// 从交易签名内容V中提取链ID
 func (tx *Transaction) ChainId() *big.Int {
 	return tx.inner.chainID()
 }
@@ -374,7 +380,9 @@ func (tx *Transaction) EffectiveGasTipIntCmp(other *big.Int, baseFee *big.Int) i
 }
 
 // Hash returns the transaction hash.
+// 哈希运算
 func (tx *Transaction) Hash() common.Hash {
+	// 检查是否已经计算过哈希值，如果已经计算过，则直接返回已经计算过的哈希值
 	if hash := tx.hash.Load(); hash != nil {
 		return hash.(common.Hash)
 	}
@@ -385,18 +393,22 @@ func (tx *Transaction) Hash() common.Hash {
 	} else {
 		h = prefixedRlpHash(tx.Type(), tx.inner)
 	}
-	tx.hash.Store(h)
+	tx.hash.Store(h) // 将计算得到的哈希值存储起来
 	return h
 }
 
 // Size returns the true RLP encoded storage size of the transaction, either by
 // encoding and returning it, or returning a previously cached value.
+// 交易大小(size)
+// 交易大小是指交易信息进行RLP编码后的数据大小、代表交易网络传输大小、代表交易占区块大小、代表交易存储大小。
+// 每笔交易进入交易池都需要检查交易大小是否超过 32KB。
+// 推送交易数据给其他节点时也需结合交易大小，在不超过网络消息最大限制(默认10MB)下分包推送数据。为避免重复计算开销，在第一次计算后便缓存。
 func (tx *Transaction) Size() common.StorageSize {
 	if size := tx.size.Load(); size != nil {
 		return size.(common.StorageSize)
 	}
 	c := writeCounter(0)
-	rlp.Encode(&c, &tx.inner)
+	rlp.Encode(&c, &tx.inner) // 交易信息进行RLP编码后的数据大小
 	tx.size.Store(common.StorageSize(c))
 	return common.StorageSize(c)
 }
@@ -467,12 +479,16 @@ func HashDifference(a, b []common.Hash) []common.Hash {
 	return keep
 }
 
+// [Nonce排序规则]👇👇👇👇👇👇👇👇👇👇👇
+// 按照交易的 nonce 对交易列表进行排序
 // TxByNonce implements the sort interface to allow sorting a list of transactions
 // by their nonces. This is usually only useful for sorting transactions from a
 // single account, otherwise a nonce comparison doesn't make much sense.
 type TxByNonce Transactions
 
-func (s TxByNonce) Len() int           { return len(s) }
+func (s TxByNonce) Len() int { return len(s) }
+
+// 比较两个交易在切片中的顺序。它根据交易的 nonce 值来判断它们的顺序
 func (s TxByNonce) Less(i, j int) bool { return s[i].Nonce() < s[j].Nonce() }
 func (s TxByNonce) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
@@ -481,6 +497,8 @@ type TxWithMinerFee struct {
 	tx       *Transaction
 	minerFee *big.Int
 }
+
+// [Nonce排序规则]👆👆👆👆👆👆👆👆👆👆👆
 
 // NewTxWithMinerFee creates a wrapped transaction, calculating the effective
 // miner gasTipCap if a base fee is provided.
@@ -496,26 +514,36 @@ func NewTxWithMinerFee(tx *Transaction, baseFee *big.Int) (*TxWithMinerFee, erro
 	}, nil
 }
 
+// [交易排序规则]👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇
 // TxByPriceAndTime implements both the sort and the heap interface, making it useful
 // for all at once sorting as well as individually adding and removing elements.
+// 实现了排序和堆接口，因此它适用于同时排序以及单独添加和删除元素
 type TxByPriceAndTime []*TxWithMinerFee
 
+// 获取切片长度
 func (s TxByPriceAndTime) Len() int { return len(s) }
+
+// ❗❗❗❗❗❗比较两个元素在切片中的顺序。❗❗❗❗❗❗
+// 首先，它比较两个元素的矿工费用（minerFee）的大小，如果相等，则使用交易的时间戳来决定排序的顺序，以保持确定性。
 func (s TxByPriceAndTime) Less(i, j int) bool {
 	// If the prices are equal, use the time the transaction was first seen for
 	// deterministic sorting
-	cmp := s[i].minerFee.Cmp(s[j].minerFee)
+	cmp := s[i].minerFee.Cmp(s[j].minerFee) // ⭐
 	if cmp == 0 {
-		return s[i].tx.time.Before(s[j].tx.time)
+		return s[i].tx.time.Before(s[j].tx.time) // ⭐
 	}
 	return cmp > 0
 }
+
+// 用于交换切片中的两个元素的位置
 func (s TxByPriceAndTime) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
+// 向切片中添加一个元素
 func (s *TxByPriceAndTime) Push(x interface{}) {
 	*s = append(*s, x.(*TxWithMinerFee))
 }
 
+// 切片中删除最后一个元素，并返回删除的元素
 func (s *TxByPriceAndTime) Pop() interface{} {
 	old := *s
 	n := len(old)
@@ -524,14 +552,20 @@ func (s *TxByPriceAndTime) Pop() interface{} {
 	return x
 }
 
+// [交易排序规则]👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆👆
+
 // TransactionsByPriceAndNonce represents a set of transactions that can return
 // transactions in a profit-maximizing sorted order, while supporting removing
 // entire batches of transactions for non-executable accounts.
 type TransactionsByPriceAndNonce struct {
-	txs     map[common.Address]Transactions // Per account nonce-sorted list of transactions
-	heads   TxByPriceAndTime                // Next transaction for each unique account (price heap)
-	signer  Signer                          // Signer for the set of transactions
-	baseFee *big.Int                        // Current base fee
+	// 为每个账户维护了一个按 nonce 排序的交易列表
+	txs map[common.Address]Transactions // Per account nonce-sorted list of transactions
+	// 它保存了每个唯一账户（按价格堆排序）的下一个交易。
+	heads TxByPriceAndTime // Next transaction for each unique account (price heap)
+	// 用于交易的签名
+	signer Signer // Signer for the set of transactions
+	// 用于表示当前的基础费用
+	baseFee *big.Int // Current base fee
 }
 
 // NewTransactionsByPriceAndNonce creates a transaction set that can retrieve
@@ -539,23 +573,34 @@ type TransactionsByPriceAndNonce struct {
 //
 // Note, the input map is reowned so the caller should not interact any more with
 // if after providing it to the constructor.
+// 创建一个交易集合，该集合可以按照价格排序的方式、遵循 nonce 的规则来检索交易。
 func NewTransactionsByPriceAndNonce(signer Signer, txs map[common.Address]Transactions, baseFee *big.Int) *TransactionsByPriceAndNonce {
 	// Initialize a price and received time based heap with the head transactions
+	// ⭐ 创建一个按Gas和时间排序的堆，并初始化为空堆。
 	heads := make(TxByPriceAndTime, 0, len(txs))
+	// 遍历输入的交易映射 txs，其中 from 是账户地址，accTxs 是该账户的交易列表。
 	for from, accTxs := range txs {
+		// 获取第一个交易的发送者地址。
 		acc, _ := Sender(signer, accTxs[0])
+		// 将第一个交易包装，并添加矿工费用，生成一个新的交易。
 		wrapped, err := NewTxWithMinerFee(accTxs[0], baseFee)
 		// Remove transaction if sender doesn't match from, or if wrapping fails.
+		// 检查包装后的交易的发送者地址是否与账户地址相符，以及包装过程中是否出现错误。
+		// 如果不匹配或者出现错误，则将该账户的交易从 txs 中删除，并继续处理下一个账户。
 		if acc != from || err != nil {
 			delete(txs, from)
 			continue
 		}
+		// 将包装后的交易加入到堆中。
 		heads = append(heads, wrapped)
+		// 将已处理过的第一个交易从该账户的交易列表中移除。
 		txs[from] = accTxs[1:]
 	}
+	// 对堆进行初始化。
 	heap.Init(&heads)
 
 	// Assemble and return the transaction set
+	// 将构造好的 TransactionsByPriceAndNonce 结构返回。
 	return &TransactionsByPriceAndNonce{
 		txs:     txs,
 		heads:   heads,

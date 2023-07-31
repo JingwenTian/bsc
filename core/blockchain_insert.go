@@ -71,7 +71,7 @@ func (st *insertStats) report(chain []*types.Block, index int, dirty common.Stor
 		if st.ignored > 0 {
 			context = append(context, []interface{}{"ignored", st.ignored}...)
 		}
-		log.Info("Imported new chain segment", context...)
+		log.Info("Imported new chain segment", context...) // 同步块数据时的日志, 看到这个输出表示已经在成功同步块
 
 		// Bump the stats reported to the next section
 		*st = insertStats{startTime: now, lastIndex: index + 1}

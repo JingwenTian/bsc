@@ -68,8 +68,11 @@ func NewBlockValidator(config *params.ChainConfig, blockchain *BlockChain, engin
 // ValidateBody validates the given block's uncles and verifies the block
 // header's transaction and uncle roots. The headers are assumed to be already
 // validated at this point.
+// 验证给定块的内容（transactions、uncles）以及块头的正确性
+
 func (v *BlockValidator) ValidateBody(block *types.Block) error {
 	// Check whether the block's known, and if not, that it's linkable
+	// 检查块是否已知，如果已知则返回错误 ErrKnownBlock
 	if v.bc.HasBlockAndState(block.Hash(), block.NumberU64()) {
 		return ErrKnownBlock
 	}
@@ -78,20 +81,24 @@ func (v *BlockValidator) ValidateBody(block *types.Block) error {
 	}
 	// Header validity is known at this point, check the uncles and transactions
 	header := block.Header()
+	// 验证块的叔块（uncles）是否有效，即检查块中包含的叔块是否满足区块奖励规则。如果验证失败，返回相应错误。
 	if err := v.engine.VerifyUncles(v.bc, block); err != nil {
 		return err
 	}
+	// 验证叔块根哈希是否匹配块头中的叔块根哈希（header.UncleHash）。如果不匹配，则返回错误。
 	if hash := types.CalcUncleHash(block.Uncles()); hash != header.UncleHash {
 		return fmt.Errorf("uncle root hash mismatch: have %x, want %x", hash, header.UncleHash)
 	}
 
 	validateFuns := []func() error{
+		// 验证交易根哈希是否匹配块头中的交易根哈希（header.TxHash）。如果不匹配，则返回错误。
 		func() error {
 			if hash := types.DeriveSha(block.Transactions(), trie.NewStackTrie(nil)); hash != header.TxHash {
 				return fmt.Errorf("transaction root hash mismatch: have %x, want %x", hash, header.TxHash)
 			}
 			return nil
 		},
+		// 验证父块是否已知。如果父块未知且无法链接到已知的父块，则返回 consensus.ErrUnknownAncestor 或 consensus.ErrPrunedAncestor 错误。
 		func() error {
 			if !v.bc.HasBlockAndState(block.ParentHash(), block.NumberU64()-1) {
 				if !v.bc.HasBlock(block.ParentHash(), block.NumberU64()-1) {
@@ -101,6 +108,7 @@ func (v *BlockValidator) ValidateBody(block *types.Block) error {
 			}
 			return nil
 		},
+		// 如果启用了远程验证器（v.remoteValidator），则还会验证块的祖先是否已被验证，如果未经验证，则返回错误 ErrAncestorHasNotBeenVerified。
 		func() error {
 			if v.remoteValidator != nil && !v.remoteValidator.AncestorVerified(block.Header()) {
 				return fmt.Errorf("%w, number: %s, hash: %s", ErrAncestorHasNotBeenVerified, block.Number(), block.Hash())

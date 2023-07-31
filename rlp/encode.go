@@ -26,6 +26,10 @@ import (
 	"github.com/ethereum/go-ethereum/rlp/internal/rlpstruct"
 )
 
+// ---------------------------
+// rlp 是以太坊定义的一套区块链数据编码解码协议，而非采用常见的 gzip、json、Protobuf 编码格式。
+// 目的是为了尽可能地压缩数据，毕竟区块链数据结构中只有常见的几种数据类型，不需要复杂的协议涉及，即可满足要求。
+
 var (
 	// Common encoded values.
 	// These are useful when implementing EncodeRLP.

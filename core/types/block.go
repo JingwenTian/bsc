@@ -97,25 +97,28 @@ func (n *BlockNonce) UnmarshalText(input []byte) error {
 //go:generate go run ../../rlp/rlpgen -type Header -out gen_header_rlp.go
 
 // Header represents a block header in the Ethereum blockchain.
+// 以太坊区块链中的区块头
+// @see https://learnblockchain.cn/books/geth/part1/block.html
+// ![](https://p.ipic.vip/3kv7b4.jpg)
 type Header struct {
-	ParentHash  common.Hash    `json:"parentHash"       gencodec:"required"`
-	UncleHash   common.Hash    `json:"sha3Uncles"       gencodec:"required"`
-	Coinbase    common.Address `json:"miner"`
-	Root        common.Hash    `json:"stateRoot"        gencodec:"required"`
-	TxHash      common.Hash    `json:"transactionsRoot" gencodec:"required"`
-	ReceiptHash common.Hash    `json:"receiptsRoot"     gencodec:"required"`
-	Bloom       Bloom          `json:"logsBloom"        gencodec:"required"`
-	Difficulty  *big.Int       `json:"difficulty"       gencodec:"required"`
-	Number      *big.Int       `json:"number"           gencodec:"required"`
-	GasLimit    uint64         `json:"gasLimit"         gencodec:"required"`
-	GasUsed     uint64         `json:"gasUsed"          gencodec:"required"`
-	Time        uint64         `json:"timestamp"        gencodec:"required"`
-	Extra       []byte         `json:"extraData"        gencodec:"required"`
-	MixDigest   common.Hash    `json:"mixHash"`
-	Nonce       BlockNonce     `json:"nonce"`
+	ParentHash  common.Hash    `json:"parentHash"       gencodec:"required"` // 父区块的哈希值
+	UncleHash   common.Hash    `json:"sha3Uncles"       gencodec:"required"` // 叔块的哈希值（叔块是指被包含在当前区块之前的区块）
+	Coinbase    common.Address `json:"miner"`                                // 挖矿奖励接收地址，即当前区块的矿工地址
+	Root        common.Hash    `json:"stateRoot"        gencodec:"required"` // 当前区块的状态树根哈希值(stateRoot)
+	TxHash      common.Hash    `json:"transactionsRoot" gencodec:"required"` // 当前区块内所有交易的哈希值的默克尔根(transactionsRoot)
+	ReceiptHash common.Hash    `json:"receiptsRoot"     gencodec:"required"` //当前区块内所有交易的收据哈希值的默克尔根(receiptRoot)
+	Bloom       Bloom          `json:"logsBloom"        gencodec:"required"` // Bloom 过滤器，用于记录区块内所有日志的 Bloom 位图(是一个256长度Byte数组。提取自receipt，用于快速定位查找交易回执中的智能合约事件信息)
+	Difficulty  *big.Int       `json:"difficulty"       gencodec:"required"` // 当前区块的难度系数，即在挖矿过程中需要满足的条件
+	Number      *big.Int       `json:"number"           gencodec:"required"` // 当前区块的高度
+	GasLimit    uint64         `json:"gasLimit"         gencodec:"required"` // 当前区块的Gas限制，即区块内所有交易允许使用的总Gas量(此数值根据父区块进行动态调整，调整的目的是调整区块所能包含的交易数量。)
+	GasUsed     uint64         `json:"gasUsed"          gencodec:"required"` // 当前区块内所有交易实际使用的Gas
+	Time        uint64         `json:"timestamp"        gencodec:"required"` // 当前区块的时间戳，表示区块的生成时间(区块时间戳可以充当时间戳服务，但不能完全信任)
+	Extra       []byte         `json:"extraData"        gencodec:"required"` // 区块头的附加数据，完全由矿工自定义，矿工一般会写一些公开推广类内容或者作为投票使用
+	MixDigest   common.Hash    `json:"mixHash"`                              // 工作量证明中的混合哈希(用于校验区块是否正确挖出。实际上是区块头数据不包含nonce时的一个哈希值)
+	Nonce       BlockNonce     `json:"nonce"`                                // 工作量证明中的随机数(用于校验区块是否正确挖出，mixHash 只有用一个正确的 nonce 才能进行PoW工作量证明)
 
 	// BaseFee was added by EIP-1559 and is ignored in legacy headers.
-	BaseFee *big.Int `json:"baseFeePerGas" rlp:"optional"`
+	BaseFee *big.Int `json:"baseFeePerGas" rlp:"optional"` // 每单位Gas的基本费用，是 EIP-1559 的核心概念之一
 
 	/*
 		TODO (MariusVanDerWijden) Add this field once needed
@@ -187,16 +190,19 @@ func (h *Header) EmptyReceipts() bool {
 
 // Body is a simple (mutable, non-safe) data container for storing and moving
 // a block's data contents (transactions and uncles) together.
+// 区块体数据
+// 区块体 Body 中只有两项数据：交易集合和叔辈区块头集合。是交易促使以太坊世界态进行转变。
 type Body struct {
-	Transactions []*Transaction
-	Uncles       []*Header
+	Transactions []*Transaction // 交易集合
+	Uncles       []*Header      // 叔辈区块头集合
 }
 
 // Block represents an entire block in the Ethereum blockchain.
+// 区块
 type Block struct {
-	header       *Header
-	uncles       []*Header
-	transactions Transactions
+	header       *Header      // 区块头
+	uncles       []*Header    // 叔辈区块头集合
+	transactions Transactions // 交易集合
 
 	// caches
 	hash atomic.Value
@@ -222,6 +228,7 @@ type extblock struct {
 // The values of TxHash, UncleHash, ReceiptHash and Bloom in header
 // are ignored and set to values derived from the given txs, uncles
 // and receipts.
+// 创建新区块
 func NewBlock(header *Header, txs []*Transaction, uncles []*Header, receipts []*Receipt, hasher TrieHasher) *Block {
 	b := &Block{header: CopyHeader(header)}
 

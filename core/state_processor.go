@@ -370,6 +370,7 @@ func (p *LightStateProcessor) LightProcess(diffLayer *types.DiffLayer, block *ty
 	return diffLayer.Receipts, allLogs, gasUsed, nil
 }
 
+// 处理区块中的所有交易，并更新状态数据库
 // Process processes the state changes according to the Ethereum rules by running
 // the transaction messages using the statedb and applying any rewards to both
 // the processor (coinbase) and any included uncles.
@@ -378,6 +379,7 @@ func (p *LightStateProcessor) LightProcess(diffLayer *types.DiffLayer, block *ty
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
 func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (*state.StateDB, types.Receipts, []*types.Log, uint64, error) {
+	// 初始化一些变量，包括已使用的燃气量（usedGas）、区块头（header）、区块哈希（blockHash）、区块号（blockNumber）、所有日志（allLogs）和燃气池（gp）等。
 	var (
 		usedGas     = new(uint64)
 		header      = block.Header()
@@ -388,13 +390,17 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	)
 
 	var receipts = make([]*types.Receipt, 0)
+
+	// 根据硬分叉规范修改区块和状态（如果需要）。
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
 		misc.ApplyDAOHardFork(statedb)
 	}
 	// Handle upgrade build-in system contract code
+	// 处理内置系统合约代码的升级。
 	systemcontracts.UpgradeBuildInSystemContract(p.config, block.Number(), statedb)
 
+	// 创建EVM块上下文（blockContext）和EVM实例（vmenv）。
 	blockContext := NewEVMBlockContext(header, p.bc, nil)
 	vmenv := vm.NewEVM(blockContext, vm.TxContext{}, statedb, p.config, cfg)
 
@@ -411,7 +417,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	// usually do have two tx, one for validator set contract, another for system reward contract.
 	systemTxs := make([]*types.Transaction, 0, 2)
 
+	// 迭代处理每个交易：
 	for i, tx := range block.Transactions() {
+		// a. 如果是PoSA共识引擎，判断是否是系统交易，如果是则跳过。
 		if isPoSA {
 			if isSystemTx, err := posa.IsSystemTransaction(tx, block.Header()); err != nil {
 				bloomProcessors.Close()
@@ -422,6 +430,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 			}
 		}
 
+		// b. 将交易转换为消息（msg），并准备好在状态数据库中标记该交易。
 		msg, err := tx.AsMessage(signer, header.BaseFee)
 		if err != nil {
 			bloomProcessors.Close()
@@ -429,40 +438,48 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		}
 		statedb.Prepare(tx.Hash(), i)
 
+		// c. 调用applyTransaction函数应用交易，并返回交易的收据。
 		receipt, err := applyTransaction(msg, p.config, p.bc, nil, gp, statedb, blockNumber, blockHash, tx, usedGas, vmenv, bloomProcessors)
 		if err != nil {
 			bloomProcessors.Close()
 			return statedb, nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
+		// d. 将交易和收据保存起来。
 		commonTxs = append(commonTxs, tx)
 		receipts = append(receipts, receipt)
 	}
-	bloomProcessors.Close()
+	bloomProcessors.Close() // 关闭收据生成器（bloomProcessors）
 
+	// 处理区块，包括应用共识引擎特定的额外操作（如区块奖励）。
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	err := p.engine.Finalize(p.bc, header, statedb, &commonTxs, block.Uncles(), &receipts, &systemTxs, usedGas)
 	if err != nil {
 		return statedb, receipts, allLogs, *usedGas, err
 	}
+	// 将所有收据的日志合并到allLogs中
 	for _, receipt := range receipts {
 		allLogs = append(allLogs, receipt.Logs...)
 	}
-
+	// 返回最终的状态数据库（statedb）、收据（receipts）、日志（allLogs）和使用的燃气量。
 	return statedb, receipts, allLogs, *usedGas, nil
 }
 
+// 应用交易并生成交易的收据
 func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainContext, author *common.Address, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM, receiptProcessors ...ReceiptProcessor) (*types.Receipt, error) {
 	// Create a new context to be used in the EVM environment.
+	// 创建一个新的EVM上下文，用于执行交易。
 	txContext := NewEVMTxContext(msg)
 	evm.Reset(txContext, statedb)
 
 	// Apply the transaction to the current state (included in the env).
+	// 将交易应用到当前状态中，包括执行合约调用、转账等操作。
 	result, err := ApplyMessage(evm, msg, gp)
 	if err != nil {
 		return nil, err
 	}
 
 	// Update the state with pending changes.
+	// 更新状态数据库，包括最终化状态（如果需要）和已使用的燃气量。
 	var root []byte
 	if config.IsByzantium(blockNumber) {
 		statedb.Finalise(true)
@@ -473,6 +490,7 @@ func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainCon
 
 	// Create a new receipt for the transaction, storing the intermediate root and gas used
 	// by the tx.
+	// 创建交易的收据，包括交易类型、状态根哈希、累计使用燃气量、交易状态等信息。
 	receipt := &types.Receipt{Type: tx.Type(), PostState: root, CumulativeGasUsed: *usedGas}
 	if result.Failed() {
 		receipt.Status = types.ReceiptStatusFailed
@@ -483,18 +501,23 @@ func applyTransaction(msg types.Message, config *params.ChainConfig, bc ChainCon
 	receipt.GasUsed = result.UsedGas
 
 	// If the transaction created a contract, store the creation address in the receipt.
+	// 当这笔交易是部署新合约时，记录新合约的地址
 	if msg.To() == nil {
 		receipt.ContractAddress = crypto.CreateAddress(evm.TxContext.Origin, tx.Nonce())
 	}
 
 	// Set the receipt logs and create the bloom filter.
+	// 获取交易的日志，并创建布隆过滤器。
 	receipt.Logs = statedb.GetLogs(tx.Hash(), blockHash)
+	// 记录区块哈希、区块号和交易索引等信息。
 	receipt.BlockHash = blockHash
 	receipt.BlockNumber = blockNumber
 	receipt.TransactionIndex = uint(statedb.TxIndex())
+	// 通过收据处理器对收据进行处理。
 	for _, receiptProcessor := range receiptProcessors {
 		receiptProcessor.Apply(receipt)
 	}
+	// 返回生成的收据和可能的错误。
 	return receipt, err
 }
 

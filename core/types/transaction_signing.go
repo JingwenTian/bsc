@@ -128,12 +128,16 @@ func MustSignNewTx(prv *ecdsa.PrivateKey, s Signer, txdata TxData) *Transaction 
 // Sender may cache the address, allowing it to be used regardless of
 // signing method. The cache is invalidated if the cached signer does
 // not match the signer used in the current call.
+// 交易发送方(from)
+// 交易的发送方，是根据签名反向计算过程，同样是CPU密集型运算。
+// 为了保证交易合法性，程序中到处都有涉及取交易发送方地址和校验发送方的合法性。只有正确的签名才能得到发送方地址。因此对交易发送方也进行缓存。
 func Sender(signer Signer, tx *Transaction) (common.Address, error) {
 	if sc := tx.from.Load(); sc != nil {
 		sigCache := sc.(sigCache)
 		// If the signer used to derive from in a previous
 		// call is not the same as used current, invalidate
 		// the cache.
+		// 在使用缓存内容时，还需要检查前后两个 Signer 是否一致，因为不一样的Signer 算法不一样，获得的交易签名者也不相同
 		if sigCache.signer.Equal(signer) {
 			return sigCache.from, nil
 		}

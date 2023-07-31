@@ -523,8 +523,11 @@ func (f *freezer) freezeRange(nfdb *nofreezedb, number, limit uint64) (hashes []
 }
 
 // delete leveldb data that save to ancientdb, split from func freeze
+// 用于从存储在 LevelDB 中的活动数据库中删除保存在 ancientdb 中的数据
+// 此函数通常用于清理不再需要的旧块数据，以便释放存储空间并保持数据库的大小可控。
 func gcKvStore(db ethdb.KeyValueStore, ancients []common.Hash, first uint64, frozen uint64, start time.Time) {
 	// Wipe out all data from the active database
+	// 创建一个新的批处理（batch），以便在后续删除操作中将多个更改一次性提交到数据库。
 	batch := db.NewBatch()
 	for i := 0; i < len(ancients); i++ {
 		// Always keep the genesis block in active database
@@ -536,7 +539,7 @@ func gcKvStore(db ethdb.KeyValueStore, ancients []common.Hash, first uint64, fro
 	if err := batch.Write(); err != nil {
 		log.Crit("Failed to delete frozen canonical blocks", "err", err)
 	}
-	batch.Reset()
+	batch.Reset() // 提交第一批删除操作到数据库。
 
 	// Wipe out side chains also and track dangling side chians
 	var dangling []common.Hash
@@ -553,9 +556,10 @@ func gcKvStore(db ethdb.KeyValueStore, ancients []common.Hash, first uint64, fro
 	if err := batch.Write(); err != nil {
 		log.Crit("Failed to delete frozen side blocks", "err", err)
 	}
-	batch.Reset()
+	batch.Reset() // 提交第二批删除操作到数据库。
 
 	// Step into the future and delete and dangling side chains
+	// 从当前 frozen 编号开始，向未来遍历子链块，逐层删除不再需要的块数据。
 	if frozen > 0 {
 		tip := frozen
 		nfdb := &nofreezedb{KeyValueStore: db}
@@ -585,12 +589,14 @@ func gcKvStore(db ethdb.KeyValueStore, ancients []common.Hash, first uint64, fro
 			dangling = children
 			tip++
 		}
+		// 提交第三批删除操作到数据库。
 		if err := batch.Write(); err != nil {
 			log.Crit("Failed to delete dangling side blocks", "err", err)
 		}
 	}
 
 	// Log something friendly for the user
+	// 告知用户成功执行深冻结链段操作，并提供一些有用的上下文信息，如被冻结的块数量、经过的时间、冻结的最后一个块哈希等。
 	context := []interface{}{
 		"blocks", frozen - first, "elapsed", common.PrettyDuration(time.Since(start)), "number", frozen - 1,
 	}
