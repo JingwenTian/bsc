@@ -81,7 +81,7 @@ var (
 	transitionDifficulty = new(big.Int).Mul(big.NewInt(20), params.MinimumDifficulty)
 
 	// blockInterval is the time interval for creating a new eth2 block
-	blockInterval    = time.Second * 3
+	blockInterval    = time.Second * 3 // 出块间隔
 	blockIntervalInt = 3
 
 	// finalizationDist is the block distance for finalizing block
@@ -146,7 +146,7 @@ func (n *ethNode) assembleBlock(parentHash common.Hash, parentTimestamp uint64) 
 	if n.typ != eth2MiningNode {
 		return nil, errors.New("invalid node type")
 	}
-	timestamp := uint64(time.Now().Unix())
+	timestamp := uint64(time.Now().Unix()) // 当前Block封块时间
 	if timestamp <= parentTimestamp {
 		timestamp = parentTimestamp + 1
 	}
