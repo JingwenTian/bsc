@@ -851,10 +851,10 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (replaced bool, err e
 	}
 
 	// Try to replace an existing transaction in the pending pool
-	// 新交易默认是要在非可执行队列中等待指示，但是一种情况时，如果该 from 的可执行队列中存在一个相同 nonce 的交易时，需要进一步识别是否能替换
+	// ❗ 新交易默认是要在非可执行队列中等待指示，但是一种情况时，如果该 from 的可执行队列中存在一个相同 nonce 的交易时，需要进一步识别是否能替换
 	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
 		// Nonce already pending, check if required price bump is met
-		// 交易池的默认配置（pool.config.PriceBump）是10%，只有上调10%手续费的交易才允许替换掉已在等待执行的交易
+		// ❗ 交易池的默认配置（pool.config.PriceBump）是10%，只有上调10%手续费的交易才允许替换掉已在等待执行的交易
 		inserted, old := list.Add(tx, pool.config.PriceBump)
 		if !inserted {
 			pendingDiscardMeter.Mark(1)

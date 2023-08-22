@@ -297,6 +297,7 @@ func newTxList(strict bool) *txList {
 
 // Overlaps returns whether the transaction specified has the same nonce as one
 // already contained within the list.
+// 判断是否存在相同Nonce的交易
 func (l *txList) Overlaps(tx *types.Transaction) bool {
 	return l.txs.Get(tx.Nonce()) != nil
 }
@@ -306,13 +307,17 @@ func (l *txList) Overlaps(tx *types.Transaction) bool {
 //
 // If the new transaction is accepted into the list, the lists' cost and gas
 // thresholds are also potentially updated.
+// 向交易列表中插入新的交易
 func (l *txList) Add(tx *types.Transaction, priceBump uint64) (bool, *types.Transaction) {
 	// If there's an older better transaction, abort
+	// 获取具有与新Tx相同nonce的旧Tx。如果存在旧Tx，则将其赋值给old变量
 	old := l.txs.Get(tx.Nonce())
 	if old != nil {
+		// 如果旧Tx的GasFeeCap>=新Tx的GasFeeCap或者旧Tx的GasTipCap>=新Tx的GasTipCap，则返回false和nil，表示新Tx未被接受。
 		if old.GasFeeCapCmp(tx) >= 0 || old.GasTipCapCmp(tx) >= 0 {
 			return false, nil
 		}
+		// 👇🏻 判断加价幅度, 决定是否允许替换同Nonce的交易
 		// thresholdFeeCap = oldFC  * (100 + priceBump) / 100
 		a := big.NewInt(100 + int64(priceBump))
 		aFeeCap := new(big.Int).Mul(a, old.GasFeeCap())

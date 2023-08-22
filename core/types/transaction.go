@@ -77,10 +77,10 @@ type TxData interface {
 	chainID() *big.Int
 	accessList() AccessList
 	data() []byte
-	gas() uint64
-	gasPrice() *big.Int
-	gasTipCap() *big.Int
-	gasFeeCap() *big.Int
+	gas() uint64         // Gas Limit
+	gasPrice() *big.Int  // Gas Price
+	gasTipCap() *big.Int // gas小费上限
+	gasFeeCap() *big.Int // gas费用上限
 	value() *big.Int
 	nonce() uint64
 	to() *common.Address
