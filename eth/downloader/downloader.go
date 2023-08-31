@@ -376,8 +376,10 @@ func (d *Downloader) UnregisterPeer(id string) error {
 
 // Synchronise tries to sync up our local blockchain with a remote peer, both
 // adding various sanity checks and wrapping it with various log entries.
+// 用于进行本地区块链与远程对等节点之间的同步操作
+// 实现了 Downloader 结构体的 Synchronise 方法, 该方法首先调用内部的 synchronise 方法来执行同步操作，然后根据返回的错误情况进行不同的处理。
 func (d *Downloader) Synchronise(id string, head common.Hash, td *big.Int, mode SyncMode) error {
-	err := d.synchronise(id, head, td, mode) // 开始同步
+	err := d.synchronise(id, head, td, mode) // 😀 开始同步
 
 	switch err {
 	case nil, errBusy, errCanceled:
@@ -405,18 +407,23 @@ func (d *Downloader) Synchronise(id string, head common.Hash, td *big.Int, mode 
 // synchronise will select the peer and use it for synchronising. If an empty string is given
 // it will use the best peer possible and synchronize if its TD is higher than our own. If any of the
 // checks fail an error will be returned. This method is synchronous
+// 根据指定的同步模式和区块头信息进行同步操作
 func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode SyncMode) error {
 	// Mock out the synchronisation if testing
+	// 🔷 检查测试模式: 首先，如果处于测试模式下（d.synchroniseMock 不为空），则会调用测试模式的同步方法。
 	if d.synchroniseMock != nil {
 		return d.synchroniseMock(id, hash)
 	}
 	// Make sure only one goroutine is ever allowed past this point at once
+	// 🔷 限制同步操作: 在进行实际同步之前，通过 CAS（Compare-And-Swap）操作确保只有一个 goroutine 可以进行同步操作。
+	// 如果有其他同步操作正在进行，则返回错误 errBusy 表示忙碌状态。
 	if !atomic.CompareAndSwapInt32(&d.synchronising, 0, 1) {
 		return errBusy
 	}
 	defer atomic.StoreInt32(&d.synchronising, 0)
 
 	// Post a user notification of the sync (only once per session)
+	// 🔷 发出同步通知: 如果是第一次开始同步（通过 d.notified 标志判断），则在控制台打印同步开始的通知，同时记录日志。
 	fmt.Printf("🍾 历史块数据开始同步....")
 	if atomic.CompareAndSwapInt32(&d.notified, 0, 1) {
 		log.Info("Block synchronisation started")
@@ -424,6 +431,7 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 	// If snap sync was requested, create the snap scheduler and switch to snap
 	// sync mode. Long term we could drop snap sync or merge the two together,
 	// but until snap becomes prevalent, we should support both. TODO(karalabe).
+	// 🔷 处理 Snap Sync: 如果是 Snap Sync 模式，会在开始之前暂停快照维护（如果快照可用），以防止并发访问。
 	if mode == SnapSync {
 		// Snap sync uses the snapshot namespace to store potentially flakey data until
 		// sync completely heals and finishes. Pause snapshot maintenance in the mean-
@@ -433,9 +441,11 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 		}
 	}
 	// Reset the queue, peer set and wake channels to clean any internal leftover state
+	// 🔷 重置状态: 重置与同步有关的状态，包括清空队列、重置对等节点集合、关闭唤醒通道等，以确保状态的干净状态。
 	d.queue.Reset(blockCacheMaxItems, blockCacheInitialItems)
 	d.peers.Reset()
 
+	// 🔷 创建取消通道: 创建一个取消通道 cancelCh，用于在同步过程中可能的中断操作。还记录当前正在同步的对等节点 ID 到 cancelPeer，以备将来使用。
 	for _, ch := range []chan bool{d.queue.blockWakeCh, d.queue.receiptWakeCh} {
 		select {
 		case <-ch:
@@ -458,13 +468,16 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 	defer d.Cancel() // No matter what, we can't leave the cancel channel open
 
 	// Atomically set the requested sync mode
+	// 🔷 设置同步模式: 通过原子操作设置所请求的同步模式，用于通知同步操作开始。
 	atomic.StoreUint32(&d.mode, uint32(mode))
 
 	// Retrieve the origin peer and initiate the downloading process
+	// 🔷 选择对等节点: 根据提供的对等节点 ID，获取相应的对等节点对象。
 	p := d.peers.Peer(id)
 	if p == nil {
 		return errUnknownPeer
 	}
+	// 🔷 发起同步操作: 调用 syncWithPeer 方法来与选择的对等节点进行实际的同步操作，传入目标区块头的哈希和总难度。如果对等节点不存在，返回错误 errUnknownPeer。
 	return d.syncWithPeer(p, hash, td)
 }
 
@@ -474,8 +487,15 @@ func (d *Downloader) getMode() SyncMode {
 
 // syncWithPeer starts a block synchronization based on the hash chain from the
 // specified peer and head hash.
+// 根据指定对等节点、目标区块头哈希和总难度进行区块同步操作
+// 实现了整个区块同步的过程，根据不同的同步模式，获取不同的区块数据（头部、块体、收据等），并对同步过程进行控制和管理。
+// 同步操作在多个 goroutine 中并发执行，从远程对等节点获取区块数据并在本地进行处理。
 func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.Int) (err error) {
+	// 🔷 发布同步开始事件: 在开始同步之前，使用 d.mux.Post(StartEvent{}) 发布一个同步开始事件。
 	d.mux.Post(StartEvent{})
+
+	// 🔷 同步完成后的处理: 使用 defer 语句，在同步操作结束后，根据是否出现错误，发布相应的完成事件。
+	// 如果没有出现错误，发布 DoneEvent 事件，否则发布 FailedEvent 事件。
 	defer func() {
 		// reset on error
 		if err != nil {
@@ -485,17 +505,22 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 			d.mux.Post(DoneEvent{latest})
 		}
 	}()
+	// 🔷 检查对等节点版本: 检查所选对等节点的协议版本是否符合最低要求（eth.ETH66）。如果不符合要求，则返回错误。
 	if p.version < eth.ETH66 {
 		return fmt.Errorf("%w: advertized %d < required %d", errTooOld, p.version, eth.ETH66)
 	}
-	mode := d.getMode()
+	mode := d.getMode() //获取同步模式（FullSync、SnapSync 或 LightSync）
 
+	// 🔷 日志记录: 记录同步操作的详细信息，包括对等节点、头部哈希、总难度和同步模式等。
 	log.Debug("Synchronising with the network", "peer", p.id, "eth", p.version, "head", hash, "td", td, "mode", mode)
 	defer func(start time.Time) {
 		log.Debug("Synchronisation terminated", "elapsed", common.PrettyDuration(time.Since(start)))
 	}(time.Now())
 
+	//  👇👇👇👇👇👇👇 同步操作主循环: 本部分实现了同步操作的主要逻辑
+
 	// Look up the sync boundaries: the common ancestor and the target block
+	// 🔷 获取同步边界: 调用 fetchHead 方法获取远程对等节点的头部信息和共同祖先块（pivot）。如果是 Snap Sync 模式且没有提供 pivot，则为了避免代码中的空指针，会使用当前区块链的头部。
 	remoteHeader, pivot, err := d.fetchHead(p)
 	if err != nil {
 		return err
@@ -509,6 +534,8 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 	}
 
 	// If the remote peer is lagging behind, no need to sync with it, drop the peer.
+	// 🔷 检查远程对等节点是否落后: 根据当前模式和区块链高度，判断远程对等节点是否落后本地区块链。
+	// 如果本地高度大于等于远程高度，检查远程区块是否在本地区块链中。如果是，则认为远程节点落后，标记其为落后，并返回错误 errLaggingPeer。
 	remoteHeight := remoteHeader.Number.Uint64()
 	var localHeight uint64
 	switch mode {
@@ -534,6 +561,7 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 			return errLaggingPeer
 		}
 	}
+	// 🔷 更新同步统计信息: 更新同步的统计信息，包括同步的起始块和结束块高度。
 	d.syncStatsLock.Lock()
 	if d.syncStatsChainHeight <= origin || d.syncStatsChainOrigin > origin {
 		d.syncStatsChainOrigin = origin
@@ -542,6 +570,8 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 	d.syncStatsLock.Unlock()
 
 	// Ensure our origin point is below any snap sync pivot point
+	// 🔷 设置 Snap Sync 的古代数据限制: 如果是 Snap Sync 模式，计算古代数据的限制高度。如果有检查点可用，则使用检查点来设置限制。
+	// 否则，使用远程高度来设置限制。同时，根据当前状态设置 ancientLimit，用于控制是否将古代数据写入数据库的古代存储区。
 	if mode == SnapSync {
 		if remoteHeight <= uint64(fsMinFullBlocks) {
 			origin = 0
@@ -599,10 +629,12 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 		}
 	}
 	// Initiate the sync using a concurrent header and content retrieval algorithm
+	// 🔷 初始化同步队列: 调用 d.queue.Prepare 初始化同步队列，准备要从远程对等节点获取的块数据。
 	d.queue.Prepare(origin+1, mode)
 	if d.syncInitHook != nil {
 		d.syncInitHook(origin, remoteHeight)
 	}
+	// 🔷 处理不同同步模式的内容: 根据同步模式，添加不同的内容获取函数到 fetchers 列表中。这些函数包括获取块头、获取块体、获取收据以及处理块头和块体等操作。
 	fetchers := []func() error{
 		func() error { return d.fetchHeaders(p, origin+1, remoteHeader.Number.Uint64()) }, // Headers are always retrieved
 		func() error { return d.fetchBodies(origin + 1) },                                 // Bodies are retrieved during normal and snap sync
@@ -616,21 +648,28 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 
 		fetchers = append(fetchers, func() error { return d.processSnapSyncContent() })
 	} else if mode == FullSync {
+		// ❗给全节点的下载器添加 processFullSyncContent(): 用于处理全节点同步内容 --> 快照同步
 		fetchers = append(fetchers, d.processFullSyncContent)
 	}
+	// 🔷 执行同步操作: 最后，调用 spawnSync 方法，将上述内容获取函数列表传递进去，并执行同步操作。这些函数会在多个 goroutine 中并发执行。
 	return d.spawnSync(fetchers)
 }
 
 // spawnSync runs d.process and all given fetcher functions to completion in
 // separate goroutines, returning the first error that appears.
 func (d *Downloader) spawnSync(fetchers []func() error) error {
+	// errc：是一个缓冲通道，用于存储每个操作返回的错误
 	errc := make(chan error, len(fetchers))
+	// d.cancelWg：是一个等待组，用于跟踪每个 fetcher 的 Goroutine，以便在它们全部完成时进行清理。
 	d.cancelWg.Add(len(fetchers))
+	// 使用 for 循环并启动每个 fetcher 函数的 Goroutine
+	// 每个 fetcher 函数会执行异步操作，将可能的错误发送到 errc 通道。
 	for _, fn := range fetchers {
 		fn := fn
 		go func() { defer d.cancelWg.Done(); errc <- fn() }()
 	}
 	// Wait for the first error, then terminate the others.
+	// 在等待错误时，如果发现任何错误且不是 errCanceled，则将其赋值给变量 err
 	var err error
 	for i := 0; i < len(fetchers); i++ {
 		if i == len(fetchers)-1 {
@@ -643,7 +682,9 @@ func (d *Downloader) spawnSync(fetchers []func() error) error {
 			break
 		}
 	}
+	// 在 for 循环结束后，关闭队列（d.queue）以通知块处理器结束
 	d.queue.Close()
+	// 最后，调用 d.Cancel() 来终止下载器的操作
 	d.Cancel()
 	return err
 }
@@ -693,15 +734,16 @@ func (d *Downloader) Terminate() {
 // a remote peer.
 func (d *Downloader) fetchHead(p *peerConnection) (head *types.Header, pivot *types.Header, err error) {
 	p.log.Debug("Retrieving remote chain head")
-	mode := d.getMode()
+	mode := d.getMode() // 获取同步模式（FullSync、SnapSync 或 LightSync）
 
 	// Request the advertised remote head block and wait for the response
-	latest, _ := p.peer.Head()
-	fetch := 1
+	latest, _ := p.peer.Head() // 获取Peer广播的最新区块头的哈希和高度
+
+	fetch := 1 // 用于指示需要获取的区块头的数量，取决于同步模式
 	if mode == SnapSync {
 		fetch = 2 // head + pivot headers
 	}
-	headers, hashes, err := d.fetchHeadersByHash(p, latest, fetch, fsMinFullBlocks-1, true)
+	headers, hashes, err := d.fetchHeadersByHash(p, latest, fetch, fsMinFullBlocks-1, true) // 获取区块头
 	if err != nil {
 		return nil, nil, err
 	}
@@ -713,9 +755,12 @@ func (d *Downloader) fetchHead(p *peerConnection) (head *types.Header, pivot *ty
 	// and request. If only 1 header was returned, make sure there's no pivot
 	// or there was not one requested.
 	head = headers[0]
+
 	if (mode == SnapSync || mode == LightSync) && head.Number.Uint64() < d.checkpoint {
 		return nil, nil, fmt.Errorf("%w: remote head %d below checkpoint %d", errUnsyncedPeer, head.Number, d.checkpoint)
 	}
+	// // headers 不为空，且其长度与请求的区块头数量相符
+	// 如果仅返回了一个区块头，确保没有请求轴头块（pivot）或请求的块高大于最小完整块数量（fsMinFullBlocks）
 	if len(headers) == 1 {
 		if mode == SnapSync && head.Number.Uint64() > uint64(fsMinFullBlocks) {
 			return nil, nil, fmt.Errorf("%w: no pivot included along head header", errBadPeer)
@@ -725,6 +770,7 @@ func (d *Downloader) fetchHead(p *peerConnection) (head *types.Header, pivot *ty
 	}
 	// At this point we have 2 headers in total and the first is the
 	// validated head of the chain. Check the pivot number and return,
+	// 如果返回了两个区块头，确保第一个区块头是已验证的链头，并根据轴头块的块高来验证轴头块的有效性
 	pivot = headers[1]
 	if pivot.Number.Uint64() != head.Number.Uint64()-uint64(fsMinFullBlocks) {
 		return nil, nil, fmt.Errorf("%w: remote pivot %d != requested %d", errInvalidChain, pivot.Number, head.Number.Uint64()-uint64(fsMinFullBlocks))
@@ -1422,16 +1468,21 @@ func (d *Downloader) processHeaders(origin uint64, td *big.Int) error {
 }
 
 // processFullSyncContent takes fetch results from the queue and imports them into the chain.
+// 🩷 处理全节点同步内容
 func (d *Downloader) processFullSyncContent() error {
 	for {
+		// 循环中，从结果队列中获取已获取的结果
 		results := d.queue.Results(true)
 		if len(results) == 0 {
-			return nil
+			return nil // 如果没有要导入的结果，直接返回
 		}
+		// 创建一个用于通知终止的通道 stop
 		stop := make(chan struct{})
+		// 如果设置了 chainInsertHook 钩子函数，则调用该函数，将结果和 stop 通道传递给钩子函数
 		if d.chainInsertHook != nil {
 			d.chainInsertHook(results, stop)
 		}
+		// 使用 importBlockResults 函数将结果导入到链中，如果导入出错，则关闭 stop 通道并返回错误
 		if err := d.importBlockResults(results); err != nil {
 			close(stop)
 			return err
@@ -1440,8 +1491,10 @@ func (d *Downloader) processFullSyncContent() error {
 	}
 }
 
+// 将下载的区块插入到区块链中
 func (d *Downloader) importBlockResults(results []*fetchResult) error {
 	// Check for any early termination requests
+	// 检查是否有早期终止请求
 	if len(results) == 0 {
 		return nil
 	}
@@ -1450,19 +1503,25 @@ func (d *Downloader) importBlockResults(results []*fetchResult) error {
 		return errCancelContentProcessing
 	default:
 	}
+
+	// 获取要导入的结果批次
 	// Retrieve the a batch of results to import
 	first, last := results[0].Header, results[len(results)-1].Header
 	log.Debug("Inserting downloaded chain", "items", len(results),
 		"firstnum", first.Number, "firsthash", first.Hash(),
 		"lastnum", last.Number, "lasthash", last.Hash(),
 	)
+
+	// 创建要导入的区块列表，包括区块头、交易和叔块
 	blocks := make([]*types.Block, len(results))
 	for i, result := range results {
 		blocks[i] = types.NewBlockWithHeader(result.Header).WithBody(result.Transactions, result.Uncles)
 	}
+
 	// Downloaded blocks are always regarded as trusted after the
 	// transition. Because the downloaded chain is guided by the
 	// consensus-layer.
+	// 🔷 使用 InsertChain 方法将下载的块插入到区块链中，被认为是受信任的块，因为下载的链受共识层引导
 	if index, err := d.blockchain.InsertChain(blocks); err != nil {
 		if index < len(results) {
 			log.Debug("Downloaded item processing failed", "number", results[index].Header.Number, "hash", results[index].Header.Hash(), "err", err)
@@ -1471,6 +1530,9 @@ func (d *Downloader) importBlockResults(results []*fetchResult) error {
 			// when it needs to preprocess blocks to import a sidechain.
 			// The importer will put together a new list of blocks to import, which is a superset
 			// of the blocks delivered from the downloader, and the indexing will be off.
+			// 在 blockchain.go 中的 InsertChain 方法有时会返回越界的索引，
+			// 当它需要预处理块以导入一个侧链时
+			// 导入程序将组合一个新的要导入的块列表，该列表是从下载程序传递的块的超集，索引将失效
 			log.Debug("Downloaded item processing failed on sidechain import", "index", index, "err", err)
 		}
 		if errors.Is(err, core.ErrAncestorHasNotBeenVerified) {

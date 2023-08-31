@@ -875,20 +875,25 @@ func (f *BlockFetcher) importHeaders(op *blockOrHeaderInject) {
 // importBlocks spawns a new goroutine to run a block insertion into the chain. If the
 // block's number is at the same height as the current import phase, it updates
 // the phase states accordingly.
+// 实现了块的导入操作，以及相关的验证和广播操作，确保将有效块成功地插入到链中
 func (f *BlockFetcher) importBlocks(op *blockOrHeaderInject) {
+	// 🔷 获取块的信息，如块的发起节点、块的内容以及块的哈希
 	peer := op.origin
 	block := op.block
 	hash := block.Hash()
 
 	// Run the import on a new thread
+	// 🔷 在新的 goroutine 中执行块导入操作，以允许并行处理
 	log.Debug("Importing propagated block", "peer", peer, "number", block.Number(), "hash", hash)
 	go func() {
 		// If the parent's unknown, abort insertion
+		// 🔷 首先检查块的父块是否已知，如果未知则放回队列并等待重新处理
 		parent := f.getBlock(block.ParentHash())
 		if parent == nil {
 			log.Debug("Unknown parent of propagated block", "peer", peer, "number", block.Number(), "hash", hash, "parent", block.ParentHash())
 			time.Sleep(reQueueBlockTimeout)
 			// forget block first, then re-queue
+			// 先忘记该块，然后重新放入队列
 			f.done <- hash
 			f.requeue <- op
 			return
@@ -896,32 +901,39 @@ func (f *BlockFetcher) importBlocks(op *blockOrHeaderInject) {
 
 		defer func() { f.done <- hash }()
 		// Quickly validate the header and propagate the block if it passes
+		// 🔷 通过验证块的头部，判断块是否可以快速传播给对等节点 --> 广播块头
 		switch err := f.verifyHeader(block.Header()); err {
 		case nil:
 			// All ok, quickly propagate to our peers
+			// 如果验证通过，则快速将块广播给对等节点
 			blockBroadcastOutTimer.UpdateSince(block.ReceivedAt)
 			go f.broadcastBlock(block, true)
 
 		case consensus.ErrFutureBlock:
+			// 如果出现未来块，则放弃该对等节点
 			log.Error("Received future block", "peer", peer, "number", block.Number(), "hash", hash, "err", err)
 			f.dropPeer(peer)
 
 		default:
 			// Something went very wrong, drop the peer
+			// 如果出现其他验证错误，则放弃该对等节点
 			log.Error("Propagated block verification failed", "peer", peer, "number", block.Number(), "hash", hash, "err", err)
 			f.dropPeer(peer)
 			return
 		}
 		// Run the actual import and log any issues
+		// 🔷 运行实际的块导入操作，将块插入到链中
 		if _, err := f.insertChain(types.Blocks{block}); err != nil {
 			log.Debug("Propagated block import failed", "peer", peer, "number", block.Number(), "hash", hash, "err", err)
 			return
 		}
 		// If import succeeded, broadcast the block
+		// 🔷 如果导入成功，则将块广播给其他节点 --> 广播块体
 		blockAnnounceOutTimer.UpdateSince(block.ReceivedAt)
 		go f.broadcastBlock(block, false)
 
 		// Invoke the testing hook if needed
+		// 🔷 如果设置了导入后的钩子函数 importedHook，则调用该函数
 		if f.importedHook != nil {
 			f.importedHook(nil, block)
 		}

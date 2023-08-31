@@ -1713,8 +1713,16 @@ func (bc *BlockChain) addFutureBlock(block *types.Block) error {
 // chain or, otherwise, create a fork. If an error is returned it will return
 // the index number of the failing block as well an error describing what went
 // wrong. After insertion is done, all accumulated events will be fired.
+// 🔜🔜🔜 尝试将给定的一批区块插入到主链中
+// 这个方法用于将一批区块插入到主链中，检查区块的连续性，获取插入锁，并在插入完成后发送相应的信号。
+// 插入操作会进行区块验证、处理和写入，并返回插入结果或错误信息。
+// 🔖 调用 InsertChain 插入区块的调用方: (sync::loop()会一直轮询对比区块总难度, 来决策是否需要强制同步历史区块)
+// 1️⃣ 历史区块快照同步: geth/main::geth()::startNode() -> cmd::StartNode() -> node::Start() -> backend::Start() -> sync::Start()::loop()::doSync() -> downloader::Synchronise()::syncWithPeer()::processFullSyncContent():importBlockResults()
+// 2️⃣ 最新区块广播同步: geth/main::geth()::startNode() -> cmd::StartNode() -> node::Start() -> backend::Start() -> sync::Start()::loop() -> block_fetcher::Start()::loop()::importBlocks()
 func (bc *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 	// Sanity check that we have something meaningful to import
+	// 执行插入前的准备：检查是否有要导入的区块，如果没有则直接返回。
+	// 同时发送一个信号通知区块处理开始，稍后会再次发送一个信号通知区块处理结束。
 	if len(chain) == 0 {
 		return 0, nil
 	}
@@ -1722,6 +1730,7 @@ func (bc *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 	defer bc.blockProcFeed.Send(false)
 
 	// Do a sanity check that the provided chain is actually ordered and linked.
+	// 进行一次连续性检查：确保提供的区块链是有序并且连接的，每个区块的编号应该递增，父哈希应该与前一个区块的哈希相匹配
 	for i := 1; i < len(chain); i++ {
 		block, prev := chain[i], chain[i-1]
 		if block.NumberU64() != prev.NumberU64()+1 || block.ParentHash() != prev.Hash() {
@@ -1737,10 +1746,12 @@ func (bc *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 		}
 	}
 	// Pre-checks passed, start the full block imports
+	// 获取区块链的插入锁：如果能够成功获取锁，则调用内部的 insertChain 方法来实际执行区块插入操作。
 	if !bc.chainmu.TryLock() {
 		return 0, errChainStopped
 	}
 	defer bc.chainmu.Unlock()
+	// 插入链操作：调用内部的 insertChain 方法，将给定的区块链插入到主链中，验证区块头、处理区块、写入区块和状态，更新度量指标等
 	return bc.insertChain(chain, true, true)
 }
 
@@ -1752,21 +1763,28 @@ func (bc *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 // racey behaviour. If a sidechain import is in progress, and the historic state
 // is imported, but then new canon-head is added before the actual sidechain
 // completes, then the historic state could be pruned again
+// 用于将一系列块插入区块链中
+// 这个方法用于在区块链上插入一系列区块，并在处理过程中进行验证、状态处理、写入以及度量指标更新等操作。
+// 它支持已知区块的跳过，处理分叉区块和主链区块，并且在插入完成后根据情况发送链头事件。
 func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool) (int, error) {
 	// If the chain is terminating, don't even bother starting up.
+	// 如果正在终止区块链插入操作，则直接返回，不再继续插入
 	if bc.insertStopped() {
 		return 0, nil
 	}
 
 	// Start a parallel signature recovery (signer will fluke on fork transition, minimal perf loss)
+	// 启动一个并行的签名恢复操作：对于分叉转换，签名恢复可能出现错误，但由于性能开销不大，因此可以并行处理
 	signer := types.MakeSigner(bc.chainConfig, chain[0].Number())
 	go senderCacher.recoverFromBlocks(signer, chain)
 
+	// lastCanon：用于存储最后一个被确认的区块，以便在插入完成后发送链头事件
 	var (
 		stats     = insertStats{startTime: mclock.Now()}
 		lastCanon *types.Block
 	)
 	// Fire a single chain head event if we've progressed the chain
+	// 捕获函数结束后发送链头事件的逻辑：如果 lastCanon 不为 nil，并且当前区块链头与 lastCanon 相同，就发送链头事件
 	defer func() {
 		if lastCanon != nil && bc.CurrentBlock().Hash() == lastCanon.Hash() {
 			bc.chainHeadFeed.Send(ChainHeadEvent{lastCanon})
@@ -1777,7 +1795,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 			}
 		}
 	}()
+
 	// Start the parallel header verifier
+	// 创建一个并行的头部验证器，用于验证区块头
 	headers := make([]*types.Header, len(chain))
 	seals := make([]bool, len(chain))
 
@@ -1785,13 +1805,16 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		headers[i] = block.Header()
 		seals[i] = verifySeals
 	}
+	// abort 和 results：用于启动并行头部验证的中止通道和结果通道
 	abort, results := bc.engine.VerifyHeaders(bc, headers, seals)
 	defer close(abort)
 
 	// Peek the error for the first block to decide the directing import logic
+	// 获取第一个区块，决定插入逻辑的方向
 	it := newInsertIterator(chain, results, bc.validator)
 	block, err := it.next()
 
+	// 检查是否应该跳过已知区块：如果该区块已知（中间的区块），并且不需要重新执行，就跳过该区块。
 	// Left-trim all the known blocks that don't need to build snapshot
 	if bc.skipBlock(err, it) {
 		// First block (and state) is known
@@ -1842,6 +1865,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		}
 		// Falls through to the block import
 	}
+
 	switch {
 	// First block is pruned
 	case errors.Is(err, consensus.ErrPrunedAncestor):
@@ -1879,13 +1903,16 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		return it.index, err
 	}
 
+	// 依次处理区块：在区块链中插入各个区块，对每个区块进行验证和处理。
 	for ; block != nil && err == nil || errors.Is(err, ErrKnownBlock); block, err = it.next() {
 		// If the chain is terminating, stop processing blocks
+		// 如果正在终止区块链插入操作，则停止处理
 		if bc.insertStopped() {
 			log.Debug("Abort during block processing")
 			break
 		}
 		// If the header is a banned one, straight out abort
+		// 检查是否为黑名单区块：如果区块的哈希在黑名单中，则报告区块并中止插入
 		if BadHashes[block.Hash()] {
 			bc.reportBlock(block, nil, ErrBannedHash)
 			return it.index, ErrBannedHash
@@ -1896,6 +1923,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		// just skip the block (we already validated it once fully (and crashed), since
 		// its header and body was already in the database). But if the corresponding
 		// snapshot layer is missing, forcibly rerun the execution to build it.
+		// 如果该区块是已知区块，则跳过：对于某些特定场景，已知区块可能需要重新执行，但不需要验证
 		if bc.skipBlock(err, it) {
 			logger := log.Debug
 			if bc.chainConfig.Clique == nil {
@@ -1931,6 +1959,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		}
 
 		// Retrieve the parent block and it's state to execute on top
+		// 处理父区块和状态：为区块的父区块创建状态，并设置状态缓存
 		start := time.Now()
 		parent := it.previous()
 		if parent == nil {
@@ -1943,9 +1972,11 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		bc.updateHighestVerifiedHeader(block.Header())
 
 		// Enable prefetching to pull in trie node paths while processing transactions
+		// 启用预取：在处理事务时启用预取以提高性能
 		statedb.StartPrefetcher("chain")
 		interruptCh := make(chan struct{})
 		// For diff sync, it may fallback to full sync, so we still do prefetch
+		// 如果区块中的交易数量足够多，异步进行状态预取和 Trie 节点预取
 		if len(block.Transactions()) >= prefetchTxNumber {
 			// do Prefetch in a separate goroutine to avoid blocking the critical path
 
@@ -1960,6 +1991,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		}
 
 		//Process block using the parent state as reference point
+		// 处理区块：使用父状态进行区块处理，获取状态根、交易收据、日志和使用的 Gas
 		substart := time.Now()
 		if bc.pipeCommit {
 			statedb.EnablePipeCommit()
@@ -1972,6 +2004,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 			statedb.StopPrefetcher()
 			return it.index, err
 		}
+		// 更新度量指标：更新与区块处理相关的度量指标
 		// Update the metrics touched during block processing
 		accountReadTimer.Update(statedb.AccountReads)                 // Account reads are complete, we can mark them
 		storageReadTimer.Update(statedb.StorageReads)                 // Storage reads are complete, we can mark them
@@ -1983,6 +2016,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		blockExecutionTimer.Update(time.Since(substart))
 
 		// Validate the state using the default validator
+		// 验证状态：使用默认验证器验证区块状态
 		substart = time.Now()
 		if !statedb.IsLightProcessed() {
 			if err := bc.validator.ValidateState(block, statedb, receipts, usedGas); err != nil {
@@ -1992,17 +2026,20 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 				return it.index, err
 			}
 		}
+		// 缓存区块和状态
 		bc.cacheReceipts(block.Hash(), receipts)
 		bc.cacheBlock(block.Hash(), block)
 		proctime := time.Since(start)
 
 		// Update the metrics touched during block validation
+		// 更新度量指标：更新与区块验证和提交相关的度量指标
 		accountHashTimer.Update(statedb.AccountHashes) // Account hashes are complete, we can mark them
 		storageHashTimer.Update(statedb.StorageHashes) // Storage hashes are complete, we can mark them
 
 		blockValidationTimer.Update(time.Since(substart))
 
 		// Write the block to the chain and get the status.
+		// 将区块写入链中：写入区块并根据状态设置链头
 		substart = time.Now()
 		var status WriteStatus
 		if !setHead {
@@ -2014,6 +2051,8 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		if err != nil {
 			return it.index, err
 		}
+
+		// 更新度量指标：更新与区块验证和提交相关的度量指标
 		// Update the metrics touched during block commit
 		accountCommitTimer.Update(statedb.AccountCommits)   // Account commits are complete, we can mark them
 		storageCommitTimer.Update(statedb.StorageCommits)   // Storage commits are complete, we can mark them
@@ -2022,12 +2061,14 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 		blockWriteTimer.Update(time.Since(substart))
 		blockInsertTimer.UpdateSince(start)
 
+		// 根据不同状态进行日志记录
 		if !setHead {
 			// We did not setHead, so we don't have any stats to update
 			log.Info("Inserted block", "number", block.Number(), "hash", block.Hash(), "txs", len(block.Transactions()), "elapsed", common.PrettyDuration(time.Since(start)))
 			return it.index, nil
 		}
 
+		// 根据区块的状态，进行不同的操作： CanonStatTy 表示插入一个新的区块， SideStatTy 表示插入一个分叉区块
 		switch status {
 		case CanonStatTy:
 			log.Debug("Inserted new block", "number", block.Number(), "hash", block.Hash(),
@@ -2054,15 +2095,20 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 				"txs", len(block.Transactions()), "gas", block.GasUsed(), "uncles", len(block.Uncles()),
 				"root", block.Root())
 		}
+		// 更新插入状态的统计信息
 		stats.processed++
 		stats.usedGas += usedGas
 
+		// 发布链头事件
 		bc.chainBlockFeed.Send(ChainHeadEvent{block})
 		dirty, _ := bc.stateCache.TrieDB().Size()
+
+		// 打印日志
 		stats.report(chain, it.index, dirty)
 	}
 
 	// Any blocks remaining here? The only ones we care about are the future ones
+	// 如果还有未处理的区块，则添加到未来区块列表中
 	if block != nil && errors.Is(err, consensus.ErrFutureBlock) {
 		if err := bc.addFutureBlock(block); err != nil {
 			return it.index, err

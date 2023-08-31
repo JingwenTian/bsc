@@ -25,6 +25,10 @@ import (
 	"time"
 )
 
+// 🧩 事件分发器, 用于管理和分发不同类型的事件给订阅者
+// 这个事件分发器的代码提供了一种机制，允许不同部分的代码通过订阅和发布事件进行通信。
+// 订阅者可以订阅特定类型的事件，并在事件发生时接收通知。事件分发器在多个订阅者之间进行事件的分发和同步。
+
 // TypeMuxEvent is a time-tagged notification pushed to subscribers.
 type TypeMuxEvent struct {
 	Time time.Time
@@ -38,10 +42,11 @@ type TypeMuxEvent struct {
 // The zero value is ready to use.
 //
 // Deprecated: use Feed
+// 事件分发器，用于注册、订阅和分发事件
 type TypeMux struct {
-	mutex   sync.RWMutex
-	subm    map[reflect.Type][]*TypeMuxSubscription
-	stopped bool
+	mutex   sync.RWMutex                            // 读写锁，用于保护订阅者信息的并发访问
+	subm    map[reflect.Type][]*TypeMuxSubscription // 映射，存储不同类型事件的订阅者列表
+	stopped bool                                    // 表示事件分发器是否已停止
 }
 
 // ErrMuxClosed is returned when Posting on a closed TypeMux.
@@ -50,6 +55,9 @@ var ErrMuxClosed = errors.New("event: mux closed")
 // Subscribe creates a subscription for events of the given types. The
 // subscription's channel is closed when it is unsubscribed
 // or the mux is closed.
+// 创建一个订阅者，订阅指定类型的事件
+// 返回一个 TypeMuxSubscription 对象，通过该对象的 Chan() 方法可以获取事件通道。
+// 如果事件分发器已经停止，则订阅者会被关闭。
 func (mux *TypeMux) Subscribe(types ...interface{}) *TypeMuxSubscription {
 	sub := newsub(mux)
 	mux.mutex.Lock()
@@ -80,6 +88,8 @@ func (mux *TypeMux) Subscribe(types ...interface{}) *TypeMuxSubscription {
 
 // Post sends an event to all receivers registered for the given type.
 // It returns ErrMuxClosed if the mux has been stopped.
+// 将事件发送给注册了相应类型的所有订阅者。
+// 如果事件分发器已停止，将返回 ErrMuxClosed 错误
 func (mux *TypeMux) Post(ev interface{}) error {
 	event := &TypeMuxEvent{
 		Time: time.Now(),
@@ -102,6 +112,8 @@ func (mux *TypeMux) Post(ev interface{}) error {
 // Stop closes a mux. The mux can no longer be used.
 // Future Post calls will fail with ErrMuxClosed.
 // Stop blocks until all current deliveries have finished.
+// 关闭事件分发器，禁止进一步使用
+// 已经在队列中的事件将继续被处理，但新的事件将无法发布
 func (mux *TypeMux) Stop() {
 	mux.mutex.Lock()
 	defer mux.mutex.Unlock()
@@ -145,21 +157,23 @@ func posdelete(slice []*TypeMuxSubscription, pos int) []*TypeMuxSubscription {
 }
 
 // TypeMuxSubscription is a subscription established through TypeMux.
+// 表示通过 TypeMux 订阅的一个订阅者对象
 type TypeMuxSubscription struct {
-	mux     *TypeMux
-	created time.Time
-	closeMu sync.Mutex
-	closing chan struct{}
-	closed  bool
+	mux     *TypeMux      // 指向订阅的事件分发器
+	created time.Time     // 订阅创建的时间
+	closeMu sync.Mutex    // 互斥锁，保护订阅者关闭操作
+	closing chan struct{} // 关闭通知通道
+	closed  bool          // 标记订阅者是否已关闭
 
 	// these two are the same channel. they are stored separately so
 	// postC can be set to nil without affecting the return value of
 	// Chan.
-	postMu sync.RWMutex
-	readC  <-chan *TypeMuxEvent
-	postC  chan<- *TypeMuxEvent
+	postMu sync.RWMutex         // 读写锁，保护事件发送通道的并发访问
+	readC  <-chan *TypeMuxEvent // 只读事件通道，用于订阅者获取事件
+	postC  chan<- *TypeMuxEvent // 事件发送通道，用于事件分发器将事件发送给订阅者
 }
 
+// 创建一个新的订阅者对象，并返回其指针
 func newsub(mux *TypeMux) *TypeMuxSubscription {
 	c := make(chan *TypeMuxEvent)
 	return &TypeMuxSubscription{
@@ -175,17 +189,20 @@ func (s *TypeMuxSubscription) Chan() <-chan *TypeMuxEvent {
 	return s.readC
 }
 
+// 取消订阅，将订阅者从事件分发器中移除，并关闭通道
 func (s *TypeMuxSubscription) Unsubscribe() {
 	s.mux.del(s)
 	s.closewait()
 }
 
+// 返回订阅者是否已关闭
 func (s *TypeMuxSubscription) Closed() bool {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
 	return s.closed
 }
 
+// 关闭订阅者，等待所有操作完成
 func (s *TypeMuxSubscription) closewait() {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
@@ -201,6 +218,7 @@ func (s *TypeMuxSubscription) closewait() {
 	s.postC = nil
 }
 
+// 将事件交付给订阅者，根据订阅者的状态和事件时间进行适当的判断
 func (s *TypeMuxSubscription) deliver(event *TypeMuxEvent) {
 	// Short circuit delivery if stale event
 	if s.created.After(event.Time) {

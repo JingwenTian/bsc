@@ -111,9 +111,23 @@ type Ethereum struct {
 	votePool *vote.VotePool
 }
 
+// 以太坊后端（EthAPI Backend）服务是以太坊客户端的核心组件之一，负责处理和提供与以太坊区块链网络的交互。它扮演着连接以太坊区块链的桥梁，向外部应用程序（如区块浏览器、DApp、智能合约等）提供了一组API，使这些应用程序能够与以太坊网络进行交互和通信。
+// 以太坊后端服务的主要作用如下：
+// 1. 数据查询与检索: 以太坊后端提供了一系列的API，允许应用程序查询区块链的状态、账户余额、交易记录、智能合约信息等。应用程序可以通过这些API获取区块链上的实时数据。
+// 2. 交易处理与广播: 应用程序可以使用以太坊后端的API创建和发送交易到区块链网络。这包括向其他账户转账、调用智能合约函数等。后端负责将交易广播到网络上，并在交易被打包进区块时返回交易的结果。
+// 3. 智能合约交互: 以太坊后端允许应用程序与已部署的智能合约进行交互。通过提供合约地址和ABI（应用程序二进制接口），应用程序可以调用合约的函数和读取状态。
+// 4. 事件监听与订阅: 后端提供了订阅机制，允许应用程序订阅区块、交易、日志等事件。当这些事件发生时，后端会主动通知应用程序，使应用程序能够实时响应。
+// 5. Gas价格管理: 以太坊后端提供了有关当前网络上的燃气价格信息，应用程序可以根据这些信息设置交易的燃气价格，以确保交易能够被尽快打包进区块。
+// 6. 账户管理与加密: 后端支持创建、管理和解锁以太坊账户。它还负责将私钥存储在安全的环境中，并对交易进行签名。
+// 7. 网络信息获取: 以太坊后端可以提供与以太坊网络有关的信息，如节点数量、协议版本等。
+// 总之，以太坊后端服务在以太坊生态系统中扮演着重要的角色，它使应用程序能够与区块链网络交互，执行交易、查询数据、与智能合约交互等，为构建去中心化应用和服务提供了强大的支持。
+
 // New creates a new Ethereum object (including the
 // initialisation of the common Ethereum object)
+// 🆕 创建一个新的 Ethereum 对象（包括初始化共同的 Ethereum 对象）
+// 负责创建以太坊客户端的核心对象，并初始化其所需的各个组件，以便节点能够加入以太坊网络并执行相应的任务。
 func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
+	// 👇👇👇👇 校验配置值的合理性和兼容性
 	// Ensure configuration values are compatible and sane
 	if config.SyncMode == downloader.LightSync {
 		return nil, errors.New("can't run eth.Ethereum in light sync mode, use les.LightEthereum")
@@ -144,6 +158,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	ethashConfig.NotifyFull = config.Miner.NotifyFull
 
 	// Assemble the Ethereum object
+	// 👇👇👇👇 打开并合并区块链数据库
 	chainDb, err := stack.OpenAndMergeDatabase("chaindata", config.DatabaseCache, config.DatabaseHandles,
 		config.DatabaseFreezer, config.DatabaseDiff, "eth/db/chaindata/", false, config.PersistDiff, config.PruneAncientData)
 	if err != nil {
@@ -159,6 +174,8 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		log.Error("Failed to recover state", "error", err)
 	}
 	merger := consensus.NewMerger(chainDb)
+
+	// 👇👇👇👇 组装 Ethereum 对象，设置各种配置和属性。
 	eth := &Ethereum{
 		config:            config,
 		merger:            merger,
@@ -175,11 +192,14 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		shutdownTracker:   shutdowncheck.NewShutdownTracker(chainDb),
 	}
 
+	// 👇👇👇👇 创建 API 后端，用于处理 RPC 请求。
 	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), stack.Config().AllowUnprotectedTxs, eth, nil}
 	if eth.APIBackend.allowUnprotectedTxs {
 		log.Info("Unprotected transactions allowed")
 	}
 	ethAPI := ethapi.NewPublicBlockChainAPI(eth.APIBackend)
+
+	// 👇👇👇👇 创建以太坊引擎，该引擎实现共识算法和区块验证逻辑。
 	eth.engine = ethconfig.CreateConsensusEngine(stack, chainConfig, &ethashConfig, config.Miner.Notify, config.Miner.Noverify, chainDb, ethAPI, genesisHash)
 
 	bcVersion := rawdb.ReadDatabaseVersion(chainDb)
@@ -232,6 +252,8 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 
 	peers := newPeerSet()
 	bcOps = append(bcOps, core.EnableBlockValidator(chainConfig, eth.engine, config.TriesVerifyMode, peers))
+
+	// 👇👇👇👇 创建区块链实例，用于管理区块和状态。
 	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, chainConfig, eth.engine, vmConfig, eth.shouldPreserve, &config.TxLookupLimit, bcOps...)
 	if err != nil {
 		return nil, err
@@ -275,11 +297,12 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		return nil, err
 	}
 
-	// 🚀 实例化Miner, 只需等待命令开启挖矿
+	// 👇👇👇👇 🚀 创建 Miner 实例，用于挖矿操作, 只需等待命令开启挖矿
 	eth.miner = miner.New(eth, &config.Miner, chainConfig, eth.EventMux(), eth.engine, eth.isLocalBlock)
 	eth.miner.SetExtra(makeExtraData(config.Miner.ExtraData))
 
 	// Create voteManager instance
+	// 👇👇👇👇 创建 voteManager 实例，用于 PoSA 共识的投票管理
 	if posa, ok := eth.engine.(consensus.PoSA); ok {
 		// Create votePool instance
 		votePool := vote.NewVotePool(chainConfig, eth.blockchain, posa)
@@ -309,6 +332,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		}
 	}
 
+	// 👇👇👇👇 创建 Gas Price Oracle（GPO）实例，用于计算合理的矿工费
 	gpoParams := config.GPO
 	if gpoParams.Default == nil {
 		gpoParams.Default = config.Miner.GasPrice
@@ -316,6 +340,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	eth.APIBackend.gpo = gasprice.NewOracle(eth.APIBackend, gpoParams)
 
 	// Setup DNS discovery iterators.
+	// 👇👇👇👇 设置 DNS 发现迭代器，用于获取节点的地址。
 	dnsclient := dnsdisc.NewClient(dnsdisc.Config{})
 	eth.ethDialCandidates, err = dnsclient.NewIterator(eth.config.EthDiscoveryURLs...)
 	if err != nil {
@@ -335,14 +360,17 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 
 	// Start the RPC service
+	// 👇👇👇👇 启动 RPC 服务，允许客户端通过 RPC 接口与节点交互
 	eth.netRPCService = ethapi.NewPublicNetAPI(eth.p2pServer, config.NetworkId)
 
 	// Register the backend on the node
+	// 👇👇👇👇 在节点上注册 API、协议和生命周期。
 	stack.RegisterAPIs(eth.APIs())
 	stack.RegisterProtocols(eth.Protocols())
 	stack.RegisterLifecycle(eth)
 
 	// Successful startup; push a marker and check previous unclean shutdowns.
+	// 👇👇👇👇 标记成功启动，并检查之前是否有非正常关闭的情况
 	eth.shutdownTracker.MarkStartup()
 
 	return eth, nil
@@ -518,7 +546,7 @@ func (s *Ethereum) SetEtherbase(etherbase common.Address) {
 // StartMining starts the miner with the given number of CPU threads. If mining
 // is already running, this method adjust the number of threads allowed to use
 // and updates the minimum price required by the transaction pool.
-// 启动挖矿
+// 👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️👷‍♂️ 启动挖矿
 func (s *Ethereum) StartMining(threads int) error {
 	// Update the thread count within the consensus engine
 	// 首先看挖矿的共识引擎是否支持设置线程数，如果支持，将更新此共识引擎参数
@@ -643,18 +671,24 @@ func (s *Ethereum) Protocols() []p2p.Protocol {
 
 // Start implements node.Lifecycle, starting all internal goroutines needed by the
 // Ethereum protocol implementation.
+// Start 实现了 node.Lifecycle 接口，启动以太坊协议实现所需的所有内部 goroutine。
 func (s *Ethereum) Start() error {
+	// 启动 ENR 过滤器和更新器，用于管理节点记录（ENR）
 	eth.StartENRFilter(s.blockchain, s.p2pServer)
 	eth.StartENRUpdater(s.blockchain, s.p2pServer.LocalNode())
 
 	// Start the bloom bits servicing goroutines
+	// 启动布隆过滤器位服务的 goroutine，用于处理布隆过滤器的位
 	s.startBloomHandlers(params.BloomBitsBlocks)
 
 	// Regularly update shutdown marker
+	// 定期更新关闭标记，以确保在关闭节点时的状态更新
 	s.shutdownTracker.Start()
 
 	// Figure out a max peers count based on the server limits
+	// 计算可用的最大节点数，考虑是否启用了轻节点服务
 	maxPeers := s.p2pServer.MaxPeers
+	// 如果启用了轻节点服务，确保轻节点数不超过总节点数，并调整最大节点数。
 	if s.config.LightServ > 0 {
 		if s.config.LightPeers >= s.p2pServer.MaxPeers {
 			return fmt.Errorf("invalid peer config: light peer count (%d) >= total peer count (%d)", s.config.LightPeers, s.p2pServer.MaxPeers)
@@ -662,6 +696,7 @@ func (s *Ethereum) Start() error {
 		maxPeers -= s.config.LightPeers
 	}
 	// Start the networking layer and the light server if requested
+	// 🌻🌻🌻🌻🌻🌻 启动网络层和轻节点服务器的 goroutine，开始处理节点之间的通信和数据同步。
 	s.handler.Start(maxPeers, s.p2pServer.MaxPeersPerIP)
 	return nil
 }

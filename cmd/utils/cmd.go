@@ -68,28 +68,35 @@ func Fatalf(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
+// 🔰🔰🔰🔰 StartNode 启动协议栈和节点实例，监控中断信号以便在关闭时执行清理操作。
 func StartNode(ctx *cli.Context, stack *node.Node, isConsole bool) {
+
+	// 🧑‍🚀 启动协议栈和节点实例
 	if err := stack.Start(); err != nil {
 		Fatalf("Error starting protocol stack: %v", err)
 	}
 	go func() {
+		// 创建一个用于捕获中断信号的通道，并设置通知
 		sigc := make(chan os.Signal, 1)
 		signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 		defer signal.Stop(sigc)
 
+		// 根据上下文信息，计算最小可用磁盘空间
 		minFreeDiskSpace := 2 * ethconfig.Defaults.TrieDirtyCache // Default 2 * 256Mb
 		if ctx.GlobalIsSet(MinFreeDiskSpaceFlag.Name) {
 			minFreeDiskSpace = ctx.GlobalInt(MinFreeDiskSpaceFlag.Name)
 		} else if ctx.GlobalIsSet(CacheFlag.Name) || ctx.GlobalIsSet(CacheGCFlag.Name) {
 			minFreeDiskSpace = 2 * ctx.GlobalInt(CacheFlag.Name) * ctx.GlobalInt(CacheGCFlag.Name) / 100
 		}
+		// 如果配置的最小可用磁盘空间大于0，则在后台启动监控磁盘空间的协程
 		if minFreeDiskSpace > 0 {
 			go monitorFreeDiskSpace(sigc, stack.InstanceDir(), uint64(minFreeDiskSpace)*1024*1024)
 		}
 
+		// 定义一个关闭节点的函数，并在收到中断信号后执行关闭操作
 		shutdown := func() {
 			log.Info("Got interrupt, shutting down...")
-			go stack.Close()
+			go stack.Close() // 🛑 关闭节点
 			for i := 10; i > 0; i-- {
 				<-sigc
 				if i > 1 {
@@ -100,9 +107,13 @@ func StartNode(ctx *cli.Context, stack *node.Node, isConsole bool) {
 			debug.LoudPanic("boom")
 		}
 
+		// 如果是在控制台模式下运行，忽略SIGINT信号，但仍然响应SIGTERM信号并执行关闭。
+		// 如果不是控制台模式，直接等待中断信号并执行关闭。
 		if isConsole {
 			// In JS console mode, SIGINT is ignored because it's handled by the console.
 			// However, SIGTERM still shuts down the node.
+			// 在JS控制台模式下，忽略SIGINT信号，因为控制台会处理它。
+			// 然而，SIGTERM仍然会关闭节点。
 			for {
 				sig := <-sigc
 				if sig == syscall.SIGTERM {

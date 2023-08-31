@@ -191,40 +191,50 @@ func New(conf *Config) (*Node, error) {
 
 // Start starts all registered lifecycles, RPC services and p2p networking.
 // Node can only be started once.
+// 🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️🕹️
+// Start 启动所有已注册的生命周期、RPC服务和P2P网络。节点只能被启动一次。
 func (n *Node) Start() error {
+	// 获取启动和停止锁，并在方法结束时解锁
 	n.startStopLock.Lock()
 	defer n.startStopLock.Unlock()
 
+	// 根据节点的状态判断是否可以启动，如果已经运行或已关闭，返回相应的错误。
 	n.lock.Lock()
 	switch n.state {
 	case runningState:
 		n.lock.Unlock()
-		return ErrNodeRunning
+		return ErrNodeRunning // 节点已运行，返回错误。
 	case closedState:
 		n.lock.Unlock()
-		return ErrNodeStopped
+		return ErrNodeStopped // 节点已关闭，返回错误。
 	}
+
+	// 将节点状态设置为运行中，然后打开网络和RPC端点，获取可能的错误。
 	n.state = runningState
 	// open networking and RPC endpoints
-	err := n.openEndpoints()
+	err := n.openEndpoints() // 🌞🌞🌞 启动P2P和RPC服务
 	lifecycles := make([]Lifecycle, len(n.lifecycles))
 	copy(lifecycles, n.lifecycles)
 	n.lock.Unlock()
 
 	// Check if endpoint startup failed.
+	// 检查是否有端点启动失败。
 	if err != nil {
 		n.doClose(nil)
 		return err
 	}
 	// Start all registered lifecycles.
+	// 启动所有已注册的生命周期。
 	var started []Lifecycle
 	for _, lifecycle := range lifecycles {
+		// 🌞🌞🌞 启动以太坊Backend所有注册的服务 --> backend.go:Start()
 		if err = lifecycle.Start(); err != nil {
 			break
 		}
 		started = append(started, lifecycle)
 	}
 	// Check if any lifecycle failed to start.
+	// 检查是否有生命周期启动失败。
 	if err != nil {
 		n.stopServices(started)
 		n.doClose(nil)
@@ -234,6 +244,8 @@ func (n *Node) Start() error {
 
 // Close stops the Node and releases resources acquired in
 // Node constructor New.
+// 🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧🚧
+// Close 停止节点并释放在 New 构造函数中获取的资源。
 func (n *Node) Close() error {
 	n.startStopLock.Lock()
 	defer n.startStopLock.Unlock()
@@ -242,17 +254,17 @@ func (n *Node) Close() error {
 	state := n.state
 	n.lock.Unlock()
 	switch state {
-	case initializingState:
+	case initializingState: // 节点从未启动过。
 		// The node was never started.
 		return n.doClose(nil)
-	case runningState:
+	case runningState: // 节点已启动，释放 Start() 获取的资源。
 		// The node was started, release resources acquired by Start().
 		var errs []error
 		if err := n.stopServices(n.lifecycles); err != nil {
 			errs = append(errs, err)
 		}
 		return n.doClose(errs)
-	case closedState:
+	case closedState: // 节点已关闭，返回错误。
 		return ErrNodeStopped
 	default:
 		panic(fmt.Sprintf("node is in unknown state %d", state))
@@ -295,13 +307,17 @@ func (n *Node) doClose(errs []error) error {
 }
 
 // openEndpoints starts all network and RPC endpoints.
+// ❗❗❗❗❗❗❗❗ 启动所有网络和RPC端点。
 func (n *Node) openEndpoints() error {
 	// start networking endpoints
 	n.log.Info("Starting peer-to-peer node", "instance", n.server.Name)
+
+	// 🌐🌐🌐🌐🌐 启动P2P Server
 	if err := n.server.Start(); err != nil {
 		return convertFileLockError(err)
 	}
 	// start RPC endpoints
+	// 🍥🍥🍥🍥🍥 启动节点 RPC 服务
 	err := n.startRPC()
 	if err != nil {
 		n.stopRPC()

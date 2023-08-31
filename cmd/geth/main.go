@@ -50,6 +50,10 @@ const (
 	clientIdentifier = "geth" // Client identifier to advertise over the network
 )
 
+// ---------------------------
+// geth 主入口文件
+// ---------------------------
+
 var (
 	// Git SHA1 commit hash of the release (set via linker flags)
 	gitCommit = ""
@@ -223,7 +227,7 @@ var (
 
 func init() {
 	// Initialize the CLI app and start Geth
-	app.Action = geth
+	app.Action = geth      // 主入口启动函数
 	app.HideVersion = true // we have a command to print the version
 	app.Copyright = "Copyright 2013-2022 The go-ethereum Authors and BSC Authors"
 	app.Commands = []cli.Command{
@@ -315,15 +319,19 @@ func prepare(ctx *cli.Context) {
 // geth is the main entry point into the system if no special subcommand is ran.
 // It creates a default node based on the command line arguments and runs it in
 // blocking mode, waiting for it to be shut down.
+// 主要启动节点的函数
 func geth(ctx *cli.Context) error {
 	if args := ctx.Args(); len(args) > 0 {
 		return fmt.Errorf("invalid command: %q", args[0])
 	}
 
 	prepare(ctx)
+	// 1️⃣ 构建完整的以太坊节点, 进行各种配置和注册操作
 	stack, backend := makeFullNode(ctx)
 	defer stack.Close()
 
+	// 2️⃣ 启动节点
+	// 启动以太坊后端注册的服务、 启动P2P Server、启动RPC Server、启动Miner等
 	startNode(ctx, stack, backend, false)
 	stack.Wait()
 	return nil
@@ -332,34 +340,42 @@ func geth(ctx *cli.Context) error {
 // startNode boots up the system node and all registered protocols, after which
 // it unlocks any requested accounts, and starts the RPC/IPC interfaces and the
 // miner.
+// 🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰🔰
+// startNode 启动系统节点和所有已注册的协议，然后解锁任何请求的账户，启动RPC/IPC接口和矿工。
 func startNode(ctx *cli.Context, stack *node.Node, backend ethapi.Backend, isConsole bool) {
-	debug.Memsize.Add("node", stack)
+	debug.Memsize.Add("node", stack) // 为节点添加内存大小信息
 
 	// Start up the node itself
+	//🤖🤖🤖🤖🤖🤖🤖🤖 启动主要节点进程
 	utils.StartNode(ctx, stack, isConsole)
 
 	// Unlock any account specifically requested
+	// 解锁任何特定请求的账户, 如果用户请求，解锁账户。
 	unlockAccounts(ctx, stack)
 
 	// Register wallet event handlers to open and auto-derive wallets
-	events := make(chan accounts.WalletEvent, 16)
-	stack.AccountManager().Subscribe(events)
+	// 注册钱包事件处理程序以打开和自动派生钱包
+	events := make(chan accounts.WalletEvent, 16) // 创建一个用于钱包事件的通道。
+	stack.AccountManager().Subscribe(events)      // 订阅节点的账户管理器到钱包事件。
 
 	// Create a client to interact with local geth node.
+	// 创建一个客户端以通过RPC与本地以太坊节点交互
 	rpcClient, err := stack.Attach()
 	if err != nil {
 		utils.Fatalf("Failed to attach to self: %v", err)
 	}
-	ethClient := ethclient.NewClient(rpcClient)
+	ethClient := ethclient.NewClient(rpcClient) // 使用RPC连接创建一个以太坊客户端
 
 	go func() {
 		// Open any wallets already attached
+		// 打开任何已连接的钱包
 		for _, wallet := range stack.AccountManager().Wallets() {
 			if err := wallet.Open(""); err != nil {
 				log.Warn("Failed to open wallet", "url", wallet.URL(), "err", err)
 			}
 		}
 		// Listen for wallet event till termination
+		// 监听钱包事件直至终止
 		for event := range events {
 			switch event.Kind {
 			case accounts.WalletArrived:
@@ -387,6 +403,8 @@ func startNode(ctx *cli.Context, stack *node.Node, backend ethapi.Backend, isCon
 
 	// Spawn a standalone goroutine for status synchronization monitoring,
 	// close the node when synchronization is complete if user required.
+	// 启动一个独立的goroutine以进行状态同步监控，
+	// 当同步完成时关闭节点，如果用户要求的话。
 	if ctx.GlobalBool(utils.ExitWhenSyncedFlag.Name) {
 		go func() {
 			sub := stack.EventMux().Subscribe(downloader.DoneEvent{})
@@ -410,8 +428,10 @@ func startNode(ctx *cli.Context, stack *node.Node, backend ethapi.Backend, isCon
 	}
 
 	// Start auxiliary services if enabled
+	// 如果启用了挖矿或开发者模式，则启动辅助服务
 	if ctx.GlobalBool(utils.MiningEnabledFlag.Name) || ctx.GlobalBool(utils.DeveloperFlag.Name) {
 		// Mining only makes sense if a full Ethereum node is running
+		// 只有在运行完整的以太坊节点时，挖矿才有意义
 		if ctx.GlobalString(utils.SyncModeFlag.Name) == "light" {
 			utils.Fatalf("Light clients do not support mining")
 		}
@@ -420,9 +440,11 @@ func startNode(ctx *cli.Context, stack *node.Node, backend ethapi.Backend, isCon
 			utils.Fatalf("Ethereum service not running")
 		}
 		// Set the gas price to the limits from the CLI and start mining
+		// 将Gas价格设置为CLI中的限制，并启动挖矿
 		gasprice := utils.GlobalBig(ctx, utils.MinerGasPriceFlag.Name)
 		ethBackend.TxPool().SetGasPrice(gasprice)
 		// start mining
+		// 👷‍♂️👷‍♂️👷‍♂️👷‍♂️ 启动挖矿
 		threads := ctx.GlobalInt(utils.MinerThreadsFlag.Name)
 		if err := ethBackend.StartMining(threads); err != nil {
 			utils.Fatalf("Failed to start mining: %v", err)

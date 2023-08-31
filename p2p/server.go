@@ -464,12 +464,16 @@ func (s *sharedUDPConn) Close() error {
 
 // Start starts running the server.
 // Servers can not be re-used after stopping.
+// 🌍🌍🌍 Start 启动运行P2P Server
 func (srv *Server) Start() (err error) {
+	// 获取锁以确保方法的独占性，然后检查服务器是否已经在运行
 	srv.lock.Lock()
 	defer srv.lock.Unlock()
 	if srv.running {
 		return errors.New("server already running")
 	}
+
+	// 标记服务器为运行状态，设置日志和时钟等相关配置
 	srv.running = true
 	srv.log = srv.Config.Logger
 	if srv.log == nil {
@@ -483,6 +487,7 @@ func (srv *Server) Start() (err error) {
 	}
 
 	// static fields
+	// 检查静态字段的设置，例如 PrivateKey、newTransport 和 listenFunc
 	if srv.PrivateKey == nil {
 		return errors.New("Server.PrivateKey must be set to a non-nil key")
 	}
@@ -492,6 +497,7 @@ func (srv *Server) Start() (err error) {
 	if srv.listenFunc == nil {
 		srv.listenFunc = net.Listen
 	}
+	// 初始化通道用于通信
 	srv.quit = make(chan struct{})
 	srv.delpeer = make(chan peerDrop)
 	srv.checkpointPostHandshake = make(chan *conn)
@@ -501,6 +507,7 @@ func (srv *Server) Start() (err error) {
 	srv.peerOp = make(chan peerOpFunc)
 	srv.peerOpDone = make(chan struct{})
 
+	// 设置本地节点信息
 	if err := srv.setupLocalNode(); err != nil {
 		return err
 	}
@@ -509,7 +516,7 @@ func (srv *Server) Start() (err error) {
 			return err
 		}
 	}
-	// 启用节点发现
+	// 启动节点发现
 	if err := srv.setupDiscovery(); err != nil {
 		return err
 	}

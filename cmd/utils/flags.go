@@ -1897,7 +1897,13 @@ func SetDNSDiscoveryDefaults(cfg *ethconfig.Config, genesis common.Hash) {
 // RegisterEthService adds an Ethereum client to the stack.
 // The second return value is the full node instance, which may be nil if the
 // node is running as a light client.
+// 用于向节点栈注册以太坊客户端服务，并返回以太坊后端实例
+// 该函数负责根据配置和同步模式注册合适的以太坊客户端服务，提供相应的API和功能，并返回相应的后端实例。这样，节点就可以根据配置的不同运行在完整同步或轻客户端模式下。
 func RegisterEthService(stack *node.Node, cfg *ethconfig.Config) (ethapi.Backend, *eth.Ethereum) {
+	// 根据给定的配置信息，判断以太坊节点的同步模式是完整同步还是轻客户端模式
+
+	// 如果同步模式为轻客户端模式，则创建轻客户端以太坊后端实例，并注册相关的API。
+	// 如果轻客户端模式下的区块链配置支持 TerminalTotalDifficulty，则注册相应的催化剂服务。
 	if cfg.SyncMode == downloader.LightSync {
 		backend, err := les.New(stack, cfg)
 		if err != nil {
@@ -1911,21 +1917,29 @@ func RegisterEthService(stack *node.Node, cfg *ethconfig.Config) (ethapi.Backend
 		}
 		return backend.ApiBackend, nil
 	}
+
+	// ❗❗❗❗❗如果同步模式为完整同步模式，则创建完整以太坊后端实例(backend)。
 	backend, err := eth.New(stack, cfg)
 	if err != nil {
 		Fatalf("Failed to register the Ethereum service: %v", err)
 	}
+
+	// 如果配置中启用了轻客户端服务（LightServ 大于0），则创建LES服务器
 	if cfg.LightServ > 0 {
 		_, err := les.NewLesServer(stack, backend, cfg)
 		if err != nil {
 			Fatalf("Failed to create the LES server: %v", err)
 		}
 	}
+	// 如果完整以太坊后端的区块链配置支持 TerminalTotalDifficulty，则注册相应的催化剂服务
 	if backend.BlockChain().Config().TerminalTotalDifficulty != nil {
 		if err := ethcatalyst.Register(stack, backend); err != nil {
 			Fatalf("Failed to register the catalyst service: %v", err)
 		}
 	}
+
+	// 🤰注册相关的API，包括添加跟踪器（tracers）相关的API。
+	// 返回以太坊后端的API实例和完整以太坊后端实例。
 	stack.RegisterAPIs(tracers.APIs(backend.APIBackend))
 	return backend.APIBackend, backend
 }

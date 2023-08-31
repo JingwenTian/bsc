@@ -117,8 +117,11 @@ func defaultNodeConfig() node.Config {
 }
 
 // makeConfigNode loads geth configuration and creates a blank node instance.
+// 加载 geth 配置并创建一个空白的节点实例
+// 该函数用于创建一个配置好的节点栈实例，从命令行参数和配置文件中加载配置，确保节点能够正确启动。
 func makeConfigNode(ctx *cli.Context) (*node.Node, gethConfig) {
 	// Load defaults.
+	// 加载默认配置
 	cfg := gethConfig{
 		Eth:     ethconfig.Defaults,
 		Node:    defaultNodeConfig(),
@@ -126,6 +129,7 @@ func makeConfigNode(ctx *cli.Context) (*node.Node, gethConfig) {
 	}
 
 	// Load config file.
+	// 加载配置文件
 	if file := ctx.GlobalString(configFileFlag.Name); file != "" {
 		if err := loadConfig(file, &cfg); err != nil {
 			utils.Fatalf("%v", err)
@@ -133,28 +137,39 @@ func makeConfigNode(ctx *cli.Context) (*node.Node, gethConfig) {
 	}
 
 	// Apply flags.
+	// 应用命令行参数
 	utils.SetNodeConfig(ctx, &cfg.Node)
+
+	// ❗❗❗❗ 根据命令行参数设置节点配置，并创建节点栈实例
 	stack, err := node.New(&cfg.Node)
 	if err != nil {
 		utils.Fatalf("Failed to create the protocol stack: %v", err)
 	}
 	// Node doesn't by default populate account manager backends
+	// 设置账户管理后端，确保节点的账户管理能正常工作
 	if err := setAccountManagerBackends(stack); err != nil {
 		utils.Fatalf("Failed to set account manager backends: %v", err)
 	}
 
+	// 根据命令行参数设置以太坊配置，并应用到节点栈实例
 	utils.SetEthConfig(ctx, stack, &cfg.Eth)
+
+	// 如果设置了 EthStats URL，将其添加到配置中
 	if ctx.GlobalIsSet(utils.EthStatsURLFlag.Name) {
 		cfg.Ethstats.URL = ctx.GlobalString(utils.EthStatsURLFlag.Name)
 	}
-	applyMetricConfig(ctx, &cfg)
+	applyMetricConfig(ctx, &cfg) // 应用度量配置
 
 	return stack, cfg
 }
 
 // makeFullNode loads geth configuration and creates the Ethereum backend.
+// 用于构建一个完整的以太坊节点，并进行各种配置和注册操作，最终返回节点和后端实例。
 func makeFullNode(ctx *cli.Context) (*node.Node, ethapi.Backend) {
+	// 调用 makeConfigNode 函数创建配置节点和配置对象。
 	stack, cfg := makeConfigNode(ctx)
+
+	// 根据上下文设置覆盖参数，例如 Berlin 升级、Arrow Glacier 升级和 Terminal Total Difficulty。
 	if ctx.GlobalIsSet(utils.OverrideBerlinFlag.Name) {
 		cfg.Eth.OverrideBerlin = new(big.Int).SetUint64(ctx.GlobalUint64(utils.OverrideBerlinFlag.Name))
 	}
@@ -164,17 +179,22 @@ func makeFullNode(ctx *cli.Context) (*node.Node, ethapi.Backend) {
 	if ctx.GlobalIsSet(utils.OverrideTerminalTotalDifficulty.Name) {
 		cfg.Eth.OverrideTerminalTotalDifficulty = new(big.Int).SetUint64(ctx.GlobalUint64(utils.OverrideTerminalTotalDifficulty.Name))
 	}
+
+	// 注册以太坊服务，并获取后端实例
 	backend, _ := utils.RegisterEthService(stack, &cfg.Eth)
 
 	// Configure GraphQL if requested
+	// 如果启用了 GraphQL，注册 GraphQL 服务
 	if ctx.GlobalIsSet(utils.GraphQLEnabledFlag.Name) {
 		utils.RegisterGraphQLService(stack, backend, cfg.Node)
 	}
 	// Add the Ethereum Stats daemon if requested.
+	// 如果配置中设置了 EthStats URL，注册以太坊统计服务 --> Prometheus + Grafana
 	if cfg.Ethstats.URL != "" {
 		utils.RegisterEthStatsService(stack, backend, cfg.Ethstats.URL)
 	}
 
+	// 配置度量指标，包括构建信息和矿工信息
 	utils.SetupMetrics(ctx,
 		utils.EnableBuildInfo(gitCommit, gitDate),
 		utils.EnableMinerInfo(ctx, cfg.Eth.Miner),
